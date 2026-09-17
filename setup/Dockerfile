@@ -6,9 +6,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 # ============================================================
 # 1. Install base dependencies
 # ============================================================
+# fontconfig is required by start.sh, which runs fc-cache over the custom fonts
+# mounted at /usr/local/share/fonts/custom. libgdiplus backs System.Drawing.Common
+# (see the symlink step below). Base font packages are no longer listed here:
+# rhino3d >= 9.0.26258 depends on fonts-liberation and ships its own fonts under
+# /usr/lib/rhino3d/Fonts, so apt pulls them in with the runtime.
 RUN apt update && apt install -y \
     wget gpg nano git curl ca-certificates jq \
-    libfontconfig1 fontconfig fonts-liberation fonts-dejavu-core \
+    libfontconfig1 fontconfig \
     libgdiplus \
     && rm -rf /var/lib/apt/lists/*
 

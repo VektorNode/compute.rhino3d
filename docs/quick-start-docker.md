@@ -1,7 +1,13 @@
-# Quick Start: Rhino.Compute in Docker (macOS)
+# Quick Start: Rhino.Compute in Docker
 
 Cheat-sheet for the commands you actually run day to day. For explanations
 and edge cases, see [setup/README.md](../setup/README.md).
+
+Commands below are macOS/Linux. On Windows (PowerShell, Docker Desktop in
+Linux-container mode) substitute `.\docker-launch.ps1` for
+`./docker-launch.sh`, `copy` for `cp`, and set env vars with
+`$env:NAME="value"` — everything else, including the container internals, is
+identical.
 
 ## First-time setup
 
@@ -81,11 +87,13 @@ layer and you get the old code. Expect several minutes (full apt install,
 | `LOCAL_PLUGINS`     | Comma-separated host folders to live-mount as plugins |
 | `NO_BUILD=1`        | Skip image build, just recreate the container         |
 | `FRESH=1`           | No-cache rebuild — use after pushing source changes   |
+| `CPUS` / `CPUSET`   | Cap CPU time (`4`) or pin cores (`0-3`) — see [README](../setup/README.md#limiting-cpu-and-memory) |
+| `MEMORY`            | RAM cap (`8g`)                                        |
 | `PLATFORM`          | Docker platform (default `linux/amd64`, also on Apple Silicon — arm64 Rhino packages lag months behind) |
 
 ## Everything runs locally
 
-`docker-launch.sh` builds and runs entirely on your Mac via OrbStack/Docker
+The launcher builds and runs entirely on your machine via OrbStack or Docker
 Desktop. The only network call during build is `git clone` of the pushed
 branch — package installs, compilation, and the running server all happen
 in a local container bound to `localhost:$PORT`.

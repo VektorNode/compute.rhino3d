@@ -21,6 +21,18 @@
 #                   Kept explicit because McNeel's arm64 Rhino packages trail the
 #                   amd64 ones by months; on Apple Silicon the default builds
 #                   under emulation rather than picking up an older Rhino.
+#   CPUS          - CPU-time cap, e.g. CPUS=4 (docker --cpus). Fractions allowed.
+#   CPUSET        - Pin to specific cores instead, e.g. CPUSET=0-3 (--cpuset-cpus).
+#                   Use one or the other; CPUSET also controls WHICH cores.
+#   MEMORY        - RAM cap, e.g. MEMORY=8g (docker --memory).
+#
+# Rhino.Compute has no core limit of its own: --childcount only sets how many
+# compute.geometry workers run, and each worker is a headless Rhino that uses
+# many threads. Cap cores at the container level (CPUS/CPUSET) and keep
+# CHILD_COUNT <= that number. Note Rhino sizes its thread pools from the
+# machine's total processor count, ignoring the cap, so each worker may still
+# spawn more threads than cores allowed — the kernel confines them, at a small
+# scheduling cost.
 #   LOCAL_PLUGINS - Comma-separated host folders to mount as live plugins,
 #                   e.g. LOCAL_PLUGINS=/path/to/MyPlugin/bin/net7.0
 #                   (rebuild plugin + `docker restart` to pick up changes)
@@ -33,7 +45,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Load setup/.env if present (RHINO_TOKEN=... etc). Env vars already set in
 # the shell win — .env only fills in what isn't already set.
 if [ -f "$SCRIPT_DIR/.env" ]; then
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM; do
+    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY; do
         eval "_prior_${var}=\"\${${var}-}\""
     done
 
@@ -42,7 +54,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
     set +a
 
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM; do
+    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY; do
         eval "if [ -n \"\${_prior_${var}-}\" ]; then ${var}=\"\${_prior_${var}}\"; fi"
     done
 fi
@@ -117,9 +129,50 @@ echo "  Image      : $IMAGE_NAME"
 echo "  Container  : $CONTAINER_NAME"
 echo "  Port       : $PORT -> 6500"
 echo "  Children   : $CHILD_COUNT"
+echo "  CPU limit  : $([ -n "$CPUSET" ] && echo "cores $CPUSET (pinned)" || { [ -n "$CPUS" ] && echo "$CPUS CPUs" || echo "none (all host cores)"; })"
+[ -n "$MEMORY" ] && echo "  Memory     : $MEMORY"
 echo "  Token      : $([ -n "$RHINO_TOKEN" ] && echo "set" || echo "NOT SET (computations will fail)")"
 echo "============================================================"
 echo ""
+
+# -------------------------------------------------------
+# Resource limits. Rhino.Compute itself cannot cap cores — --childcount only
+# sets how many compute.geometry workers run, and each is a headless Rhino
+# using many threads. The cap belongs at the container level; CHILD_COUNT must
+# then stay at or below the allowed core count, or workers contend for cores.
+# -------------------------------------------------------
+LIMIT_ARGS=()
+if [ -n "$CPUS" ] && [ -n "$CPUSET" ]; then
+    echo "    WARNING: CPUS and CPUSET are both set — using CPUSET ($CPUSET) and"
+    echo "             ignoring CPUS. CPUSET pins which cores; CPUS caps CPU time."
+    CPUS=""
+fi
+[ -n "$CPUS" ]   && LIMIT_ARGS+=(--cpus "$CPUS")
+[ -n "$CPUSET" ] && LIMIT_ARGS+=(--cpuset-cpus "$CPUSET")
+[ -n "$MEMORY" ] && LIMIT_ARGS+=(--memory "$MEMORY")
+
+# Count the cores the cap actually allows, so we can sanity-check CHILD_COUNT.
+_allowed=""
+if [ -n "$CPUSET" ]; then
+    # "0-3", "0,2,4" or a mix of both
+    _allowed=0
+    IFS=',' read -ra _parts <<< "$CPUSET"
+    for _p in "${_parts[@]}"; do
+        case "$_p" in
+            *-*) _allowed=$((_allowed + ${_p#*-} - ${_p%-*} + 1)) ;;
+            "")  ;;
+            *)   _allowed=$((_allowed + 1)) ;;
+        esac
+    done
+elif [ -n "$CPUS" ]; then
+    _allowed="${CPUS%%.*}"   # 3.5 CPUs -> treat as 3 whole workers
+fi
+if [ -n "$_allowed" ] && [ "$_allowed" -gt 0 ] 2>/dev/null && [ "$CHILD_COUNT" -gt "$_allowed" ] 2>/dev/null; then
+    echo "    WARNING: CHILD_COUNT=$CHILD_COUNT exceeds the $_allowed core(s) this container"
+    echo "             may use. Each child is a full headless Rhino — running more"
+    echo "             workers than cores mostly adds contention. Consider CHILD_COUNT=$_allowed."
+    echo ""
+fi
 
 # -------------------------------------------------------
 # Build the image
@@ -221,6 +274,7 @@ docker run -d \
     -e RHINO_TOKEN="$RHINO_TOKEN" \
     -e RHINO_COMPUTE_CHILD_COUNT="$CHILD_COUNT" \
     "${ENV_ARGS[@]}" \
+    "${LIMIT_ARGS[@]}" \
     "${MOUNT_ARGS[@]}" \
     "$IMAGE_NAME" >/dev/null
 

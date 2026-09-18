@@ -5,26 +5,47 @@ Automated Docker setup for running Rhino.Compute from the x9 branch on Linux.
 > Just need the commands? See [docs/quick-start-docker.md](../docs/quick-start-docker.md)
 > for a no-prose cheat-sheet of the day-to-day workflow.
 
-## Quick Start (automated, macOS/Linux)
+## Quick Start (automated)
 
-Run the launch script — it checks for Docker, starts OrbStack/Docker Desktop if
-it's not running, builds the image, and runs the container:
+Run the launch script for your shell — it checks for Docker, starts
+OrbStack/Docker Desktop if it's not running, builds the image, and runs the
+container:
+
+**macOS / Linux:**
 
 ```bash
 cd setup
 RHINO_TOKEN=your-token-here ./docker-launch.sh
 ```
 
+**Windows (PowerShell):**
+
+```powershell
+cd setup
+$env:RHINO_TOKEN="your-token-here"; .\docker-launch.ps1
+```
+
+Both scripts build the same Linux image and pass the same mounts — only the
+host-side scripting differs. On Windows this needs **Docker Desktop in Linux
+container mode** (the default, backed by WSL2); the script stops with a clear
+message if Docker is in Windows-container mode. Everything inside the
+container — `start.sh`, plugin staging, the duplicate-`.gha` guard, native
+library fixes, fonts — is identical on every host.
+
 Or, to avoid typing the token every time, copy `.env.example` to `.env` and
 fill in `RHINO_TOKEN` (and any other overrides). `setup/.env` is gitignored
-and is loaded automatically:
+and is loaded automatically by both scripts:
 
 ```bash
 cd setup
 cp .env.example .env
 # edit .env and set RHINO_TOKEN
-./docker-launch.sh
+./docker-launch.sh            # or  .\docker-launch.ps1  on Windows
 ```
+
+On Windows, write `LOCAL_PLUGINS` paths in `.env` the way Windows spells
+them (`C:\Users\you\src\my-plugin\Build\net8.0`), comma-separated. Docker
+Desktop translates them; the container side stays POSIX either way.
 
 Values already set in your shell environment take priority over `.env`.
 
@@ -39,6 +60,48 @@ The image is always built and run as `linux/amd64`, also on Apple Silicon
 `rhino3d` package for arm64 months behind amd64, so a native arm64 image
 would quietly get an older Rhino. Override with `PLATFORM=linux/arm64` only
 if you have checked that the arm64 package has what you need.
+
+## Limiting CPU and Memory
+
+Rhino.Compute has **no built-in core limit**. `--childcount` (our
+`CHILD_COUNT`) only sets how many `compute.geometry` workers run, and each
+worker is a full headless Rhino that uses many threads — so child count alone
+does not cap cores. The cap belongs at the container level:
+
+```bash
+# in setup/.env, or inline
+CPUS=4 CHILD_COUNT=4 MEMORY=8g ./docker-launch.sh   # cap CPU time
+CPUSET=0-3 CHILD_COUNT=4 ./docker-launch.sh          # or pin specific cores
+```
+
+| Var      | Docker flag       | Meaning                                  |
+| -------- | ----------------- | ---------------------------------------- |
+| `CPUS`   | `--cpus`          | CPU-time cap; fractions allowed (`2.5`)  |
+| `CPUSET` | `--cpuset-cpus`   | Pin to specific cores (`0-3`, `0,2,4`)   |
+| `MEMORY` | `--memory`        | RAM cap (`8g`)                           |
+
+Set one of `CPUS` or `CPUSET`, not both — the launcher warns and prefers
+`CPUSET`. Keep `CHILD_COUNT` at or below the allowed core count; the launcher
+warns when it isn't, since extra workers mostly add contention.
+
+**Expect `nproc` inside the container to still report the host's full core
+count.** Rhino sizes its internal thread pools from the machine's total
+processor count, which ignores the cap, so each worker may create more
+threads than the cores it is allowed. The kernel confines them, so CPU usage
+is capped as intended — the cost is some scheduling overhead, meaning
+slightly lower throughput than a physical machine of that size. Verify the
+cap is real with:
+
+```bash
+docker exec <container> cat /sys/fs/cgroup/cpu.max   # "400000 100000" = 4 cores
+```
+
+On Windows, Docker Desktop's own VM has a global CPU/memory ceiling
+(Settings → Resources) that applies on top of these per-container limits.
+
+Outside Docker, the same capping is done with IIS app-pool processor affinity
+(Windows) or `AllowedCPUs`/`CPUQuota` in a systemd drop-in (Linux) — the
+children inherit the parent's limit in both cases.
 
 ## Checking Status
 

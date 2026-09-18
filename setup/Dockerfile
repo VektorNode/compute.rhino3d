@@ -40,12 +40,28 @@ RUN GDIP="$(dpkg -L libgdiplus | grep -m1 'libgdiplus\.so')" \
 # ============================================================
 # 3. Add McNeel package repo and install Rhino runtime libs
 # ============================================================
+# RHINO3D_VERSION pins the daily WIP build of the rhino3d core libraries. McNeel
+# publishes a new one most nights and `stable main` always resolves to the newest,
+# so an unpinned build is not reproducible: a FRESH=1 rebuild silently moves to
+# whatever shipped overnight. 9.0.26261.7009 regressed Grasshopper plugin loading
+# on Linux (System.Drawing.Common failures in GH priority objects / .ghuser files,
+# followed by a native LINUXFAIL abort in RhinoCore on the first solve), so we hold
+# at the last known-good build. Set to empty to track latest again.
+ARG RHINO3D_VERSION=9.0.26260.7019
+
 RUN wget -qO- https://mcneel-packages.s3.amazonaws.com/mcneel-packages.gpg.key \
       | gpg --dearmor -o /usr/share/keyrings/mcneel-archive-keyring.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/mcneel-archive-keyring.gpg] \
       https://mcneel-packages.s3.amazonaws.com/deb stable main" \
       | tee /etc/apt/sources.list.d/mcneel.list \
-    && apt update && apt install -y rhino-compute yak-cli \
+    && apt update \
+    # rhino3d arrives as a dependency of rhino-compute, so install the pinned
+    # version first and hold it, otherwise apt resolves the dependency to latest.
+    && if [ -n "${RHINO3D_VERSION}" ]; then \
+         apt install -y "rhino3d=${RHINO3D_VERSION}" \
+         && apt-mark hold rhino3d; \
+       fi \
+    && apt install -y rhino-compute yak-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # ============================================================

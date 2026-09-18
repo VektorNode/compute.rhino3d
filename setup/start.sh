@@ -94,9 +94,24 @@ for src in /plugins /plugins-local; do
         echo "  Loading custom plugins from $src ..."
         mkdir -p "$GH_LIBRARIES"
 
-        # Loose assemblies and folders (everything except .yak archives)
-        find "$src" -mindepth 1 -maxdepth 1 ! -name '*.yak' ! -name 'README*' \
-            -exec cp -rf {} "$GH_LIBRARIES/" \;
+        # Loose assemblies and folders (everything except .yak archives).
+        #
+        # A plugin present under BOTH /plugins (a copy left in setup/plugins)
+        # and /plugins-local (a live LOCAL_PLUGINS mount) must come from the
+        # live mount alone. `cp -rf` onto an existing folder MERGES the two
+        # trees instead, and when the stale copy has a different layout
+        # (net7.0/<plugin>/net7.0/*.gha) its .gha survives the flatten step
+        # below as a second copy of the same assembly. Grasshopper then loads
+        # whichever it scans first — silently, the assembly name is identical
+        # — and a component fails at solve time with a TypeLoadException for
+        # a type only the OLD build referenced, while every hash checked
+        # against the live build matches. /plugins-local is processed last,
+        # so replacing the target wholesale is what makes the live mount win.
+        while read -r item; do
+            [ -e "$item" ] || continue
+            rm -rf "$GH_LIBRARIES/$(basename "$item")"
+            cp -rf "$item" "$GH_LIBRARIES/"
+        done < <(find "$src" -mindepth 1 -maxdepth 1 ! -name '*.yak' ! -name 'README*' 2>/dev/null)
 
         # Yak archives
         for y in "$src"/*.yak; do
@@ -146,6 +161,80 @@ flatten_tfm_dirs() {
 
 flatten_tfm_dirs "$GH_LIBRARIES"
 flatten_tfm_dirs "$YAK_PACKAGES"
+
+# ------------------------------------------------------------
+# Refuse to start with two copies of the same .gha anywhere under
+# the Libraries folder. Grasshopper scans it recursively and keys
+# assemblies by name, so a duplicate is loaded silently and every
+# other log line looks healthy — see the note on the copy loop
+# above for how it happens and what it costs to find.
+# ------------------------------------------------------------
+dupes=$(find "$GH_LIBRARIES" -name '*.gha' -printf '%f\n' 2>/dev/null | sort | uniq -d)
+if [ -n "$dupes" ]; then
+    echo "  ERROR: the same Grasshopper assembly is present more than once:"
+    for d in $dupes; do find "$GH_LIBRARIES" -name "$d" | sed 's/^/    /'; done
+    echo "  Grasshopper would load one of them at random. Remove the stale copy"
+    echo "  (usually a leftover under setup/plugins/) and restart."
+    exit 1
+fi
+
+# ------------------------------------------------------------
+# NOTE — do NOT copy shared contract assemblies between plugin
+# folders. Selva keeps Selva.FileIO.dll (FileData, the file
+# contract) out of its ILRepack merge so other repos can bind to
+# it, and those repos reference it with Private=false so exactly
+# ONE copy is on disk. A second copy next to a consumer gives the
+# CLR two assembly identities for one type, and casts between
+# them fail. Rhino resolves the single copy through Selva's own
+# plugin folder; if that ever stops working, fix the reference,
+# not the file layout.
+# ------------------------------------------------------------
+
+# ------------------------------------------------------------
+# Put the right native libraries next to each .gha.
+#
+# Plugins are built on a developer machine, and the flat native
+# that lands beside the .gha is whatever that build picked: a
+# Windows .dll from a win-x64 build, or an arm64 .so from an
+# Apple Silicon one. Neither can be loaded in an amd64 Linux
+# container. SkiaSharp then throws from a GC finalizer, which is
+# unhandled and kills the child process mid-solve — the client
+# just sees a bare 500 with no error in the response.
+#
+# NuGet lays every RID down under runtimes/<rid>/native in the
+# same plugin folder, so the correct library is always already
+# there; it just isn't the one in the flat slot the OS loader
+# searches. Copy it up, whether the flat slot holds a wrong-arch
+# .so or no .so at all.
+# ------------------------------------------------------------
+case "$(uname -m)" in
+    x86_64)  WANT_RID=linux-x64 ;;
+    aarch64) WANT_RID=linux-arm64 ;;
+    *)       WANT_RID="" ;;
+esac
+
+if [ -n "$WANT_RID" ] && [ -d "$GH_LIBRARIES" ]; then
+    fixed=0
+    while read -r native; do
+        [ -f "$native" ] || continue
+        # .../<plugin>/runtimes/<rid>/native/lib.so -> .../<plugin>/lib.so
+        dest="${native%/runtimes/$WANT_RID/native/*}/$(basename "$native")"
+        if [ -f "$dest" ]; then
+            # ELF e_machine (offset 18): 3e00 = x86-64, b700 = aarch64.
+            # A Windows .dll in the flat slot has no ELF header and so
+            # never matches — it gets replaced, which is what we want.
+            mach=$(od -An -tx1 -j18 -N2 "$dest" 2>/dev/null | tr -d ' \n')
+            case "$WANT_RID:$mach" in
+                linux-x64:3e00|linux-arm64:b700) continue ;;  # already correct
+            esac
+        fi
+        cp -f "$native" "$dest"
+        echo "  Installed $(basename "$native") ($WANT_RID) in $(basename "$(dirname "$dest")")"
+        fixed=$((fixed + 1))
+    done < <(find "$GH_LIBRARIES" -path "*/runtimes/$WANT_RID/native/*.so" 2>/dev/null)
+    [ "$fixed" -gt 0 ] && echo "  Native fix: installed $fixed $WANT_RID librar$([ "$fixed" -eq 1 ] && echo y || echo ies)."
+    echo ""
+fi
 
 # ------------------------------------------------------------
 # Refresh the font cache so custom fonts mounted at

@@ -17,6 +17,10 @@
 #   REPO_URL      - Repo to clone inside the image (default: Dockerfile's ARG default)
 #   BRANCH        - Branch to check out inside the image (default: Dockerfile's ARG default)
 #   NO_BUILD      - Skip the image build step if set to "1" (reuse existing image)
+#   PLATFORM      - Docker platform to build and run for (default: linux/amd64).
+#                   Kept explicit because McNeel's arm64 Rhino packages trail the
+#                   amd64 ones by months; on Apple Silicon the default builds
+#                   under emulation rather than picking up an older Rhino.
 #   LOCAL_PLUGINS - Comma-separated host folders to mount as live plugins,
 #                   e.g. LOCAL_PLUGINS=/path/to/MyPlugin/bin/net7.0
 #                   (rebuild plugin + `docker restart` to pick up changes)
@@ -29,7 +33,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Load setup/.env if present (RHINO_TOKEN=... etc). Env vars already set in
 # the shell win — .env only fills in what isn't already set.
 if [ -f "$SCRIPT_DIR/.env" ]; then
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS; do
+    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM; do
         eval "_prior_${var}=\"\${${var}-}\""
     done
 
@@ -38,7 +42,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
     set +a
 
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS; do
+    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM; do
         eval "if [ -n \"\${_prior_${var}-}\" ]; then ${var}=\"\${_prior_${var}}\"; fi"
     done
 fi
@@ -46,6 +50,10 @@ fi
 IMAGE_NAME="${IMAGE_NAME:-rhino-compute-x9}"
 CONTAINER_NAME="${CONTAINER_NAME:-rhino-compute-x9}"
 PORT="${PORT:-6500}"
+# Always amd64, even on Apple Silicon: the McNeel apt repo publishes rhino3d
+# for arm64 months behind amd64, so a native arm64 build silently gets an
+# older Rhino (and, at the time of writing, none of the Linux font fixes).
+PLATFORM="${PLATFORM:-linux/amd64}"
 CHILD_COUNT="${CHILD_COUNT:-1}"
 
 log() { echo ""; echo "==> $1"; }
@@ -128,7 +136,7 @@ else
     # since the git clone happens in a cached build layer
     [ "$FRESH" = "1" ] && BUILD_ARGS+=(--no-cache)
 
-    docker build -t "$IMAGE_NAME" "${BUILD_ARGS[@]}" "$SCRIPT_DIR"
+    docker build --platform "$PLATFORM" -t "$IMAGE_NAME" "${BUILD_ARGS[@]}" "$SCRIPT_DIR"
     ok "Image built"
 fi
 
@@ -152,7 +160,15 @@ log "Starting container '$CONTAINER_NAME'"
 mkdir -p "$SCRIPT_DIR/plugins"
 
 MOUNT_ARGS=(-v "$SCRIPT_DIR/plugins:/plugins:ro")
-[ -f "$SCRIPT_DIR/packages.json" ] && MOUNT_ARGS+=(-v "$SCRIPT_DIR/packages.json:/packages.json:ro")
+if [ -f "$SCRIPT_DIR/packages.json" ]; then
+    MOUNT_ARGS+=(-v "$SCRIPT_DIR/packages.json:/packages.json:ro")
+else
+    # packages.json is gitignored (per-deployment, like .env). Without it the
+    # container starts cleanly with NO yak packages and no local-plugin
+    # checks, and the failure only shows up later as solves missing components.
+    echo "    WARNING: setup/packages.json not found — no yak packages will be installed."
+    echo "             cp packages.example.json packages.json  (then edit) to fix."
+fi
 
 # Custom fonts (setup/fonts) — needed by text-to-curve components; the container
 # ships only Liberation/DejaVu. start.sh runs fc-cache on start.
@@ -199,6 +215,7 @@ ENV_ARGS=()
 [ -n "$RHINO_COMPUTE_KEY" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_KEY=$RHINO_COMPUTE_KEY")
 
 docker run -d \
+    --platform "$PLATFORM" \
     --name "$CONTAINER_NAME" \
     -p "${PORT}:6500" \
     -e RHINO_TOKEN="$RHINO_TOKEN" \

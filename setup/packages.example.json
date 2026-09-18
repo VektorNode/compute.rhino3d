@@ -1,0 +1,11 @@
+{
+  "$comment": "Template — copy to packages.json (gitignored, per deployment) and edit. Processed by start.sh on every container start.",
+
+  "$yak": "Packages installed from the Yak server (https://yak.rhino3d.com). 'version' is optional: omit it to get the newest RELEASE on each container recreation; pin it for reproducible builds. Prereleases (e.g. 1.0.0-beta.3) are never picked up automatically — yak only installs them when the exact version is given.",
+  "yak": [
+    { "name": "Selva" }
+  ],
+
+  "$local": "Custom plugins not on Yak. Each entry is a folder or file name that must exist either in setup/plugins/ (mounted at /plugins) or as a LOCAL_PLUGINS live mount from .env (mounted at /plugins-local/local-<i>-<folder>). Never both — the container refuses to start on a duplicate .gha. Listing a plugin here only makes start.sh WARN when it is missing; loading happens regardless.",
+  "local": []
+}

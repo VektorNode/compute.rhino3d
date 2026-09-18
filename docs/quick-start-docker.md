@@ -9,6 +9,8 @@ and edge cases, see [setup/README.md](../setup/README.md).
 cd setup
 cp .env.example .env
 # edit .env: set RHINO_TOKEN (and RHINO_COMPUTE_KEY if your app needs one)
+cp packages.example.json packages.json
+# edit packages.json: the yak packages + local plugins this server should load
 ./docker-launch.sh
 ```
 
@@ -40,10 +42,17 @@ cd setup
 NO_BUILD=1 ./docker-launch.sh
 ```
 
-Drop custom (non-Yak) `.gha`/`.dll` files into `setup/plugins/` — no
-rebuild needed, just `NO_BUILD=1 ./docker-launch.sh` (or a plain
-`docker restart rhino-compute-x9` if you're using `LOCAL_PLUGINS` live
-mounts, since those re-copy on every container start).
+Custom (non-Yak) plugins come from **one** of two places — pick per plugin,
+never both:
+
+- `setup/plugins/` — drop the `.gha`/`.dll` there, then `NO_BUILD=1 ./docker-launch.sh`.
+- `LOCAL_PLUGINS` in `.env` — live-mount your build folder, then a plain
+  `docker restart rhino-compute-x9` re-copies it on every start.
+
+`setup/plugins/` is gitignored, so an old copy left there is invisible to
+git and keeps loading under the same assembly name as your live build. The
+container refuses to start if it finds the same `.gha` twice; when it does,
+the leftover is in `setup/plugins/`.
 
 ## After changing compute.rhino3d source code
 
@@ -72,6 +81,7 @@ layer and you get the old code. Expect several minutes (full apt install,
 | `LOCAL_PLUGINS`     | Comma-separated host folders to live-mount as plugins |
 | `NO_BUILD=1`        | Skip image build, just recreate the container         |
 | `FRESH=1`           | No-cache rebuild — use after pushing source changes   |
+| `PLATFORM`          | Docker platform (default `linux/amd64`, also on Apple Silicon — arm64 Rhino packages lag months behind) |
 
 ## Everything runs locally
 

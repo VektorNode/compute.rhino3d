@@ -29,10 +29,16 @@ cp .env.example .env
 Values already set in your shell environment take priority over `.env`.
 
 See the script header for env vars (`PORT`, `CHILD_COUNT`, `IMAGE_NAME`,
-`REPO_URL`, `BRANCH`, `NO_BUILD`). Re-running it rebuilds the image and
-replaces the running container. It waits for `/healthcheck` to respond
-before declaring success — you'll see a clear pass/fail, not just
+`REPO_URL`, `BRANCH`, `NO_BUILD`, `PLATFORM`). Re-running it rebuilds the
+image and replaces the running container. It waits for `/healthcheck` to
+respond before declaring success — you'll see a clear pass/fail, not just
 "container started".
+
+The image is always built and run as `linux/amd64`, also on Apple Silicon
+(where it runs under emulation — expect slower solves). McNeel publishes the
+`rhino3d` package for arm64 months behind amd64, so a native arm64 image
+would quietly get an older Rhino. Override with `PLATFORM=linux/arm64` only
+if you have checked that the arm64 package has what you need.
 
 ## Checking Status
 
@@ -133,8 +139,17 @@ and is only used internally by the main server.
 
 ## Plugin Manifest (packages.json)
 
-`setup/packages.json` declares every plugin the server needs — the single
-source of truth, tracked in git:
+`setup/packages.json` declares every plugin the server needs. Like `.env`,
+your copy is gitignored (deployments differ in what they load); the tracked
+template is `packages.example.json` — copy it once and edit:
+
+```bash
+cd setup
+cp packages.example.json packages.json
+```
+
+`docker-launch.sh` warns if the file is missing, because the container then
+starts with **no** plugins and every solve that needs one fails later.
 
 ```json
 {
@@ -147,7 +162,10 @@ source of truth, tracked in git:
 ```
 
 - **`yak`** — installed from the Yak server on container start. `version` is
-  optional; omit it to always get the latest.
+  optional; omit it to always get the latest **release**. Prerelease versions
+  (`1.0.0-beta.13`) are only installed when pinned exactly — an unpinned
+  entry resolves to the newest stable, which can be a downgrade from a beta
+  you were running.
 - **`local`** — file/folder names expected in `setup/plugins/` (see
   [Custom Plugins](#custom-plugins-not-on-yak) below). The container warns at
   startup if a declared file is missing.
@@ -233,6 +251,21 @@ Because the folder lives on the host, plugins **survive container
 recreation** — unlike `docker exec ... yak install`, there is nothing to
 redo after re-running `docker-launch.sh`.
 
+### One source per plugin
+
+A plugin comes from **either** `setup/plugins/` **or** a `LOCAL_PLUGINS`
+mount — never both. `setup/plugins/` is gitignored, so a copy dropped there
+months ago is invisible to `git status` and keeps being loaded long after
+you have moved on to live-mounting the same plugin. The two copies have the
+same assembly name, Grasshopper loads whichever it scans first, and every
+log line looks healthy — until a component fails at solve time with a
+`TypeLoadException` for a type that only the stale build referenced.
+
+`start.sh` now defends against this: a live mount replaces any same-named
+folder outright rather than merging with it, and the container **refuses to
+start** if the same `.gha` is found twice under the Libraries folder. If you
+see that error, delete the leftover under `setup/plugins/` and restart.
+
 ### Live-mounting a plugin you're developing
 
 Instead of copying build output into `setup/plugins/` after every build, set
@@ -254,8 +287,13 @@ docker restart rhino-compute-x9   # re-copies plugins into GH Libraries
 Optionally declare the mount name under `"local"` in `packages.json` so the
 container warns if the mount is missing.
 
-> Note: plugins must be pure .NET to load on Linux Rhino. A .gha that
-> P/Invokes Windows-only native libraries will fail inside the container.
+> Note on native libraries: a plugin built on Windows or an Apple Silicon Mac
+> ships a Windows `.dll` or an arm64 `.so` next to its `.gha`, neither of
+> which loads in the amd64 container. As long as the plugin also carries the
+> NuGet `runtimes/<rid>/native/` tree (SkiaSharp, HarfBuzzSharp and most
+> native-asset packages do), `start.sh` installs the `linux-x64` build on
+> every start and nothing needs changing in the plugin. A plugin that
+> P/Invokes a Windows-only library with no Linux build will still fail.
 
 ## Useful Commands
 
@@ -334,6 +372,17 @@ are reflected immediately because the volume mount keeps them in sync.
 See [docs/grasshopper-plugins-not-loading-linux.md](../docs/grasshopper-plugins-not-loading-linux.md)
 — a full write-up of why Grasshopper plugins can silently fail to load on
 Linux and how this repo fixes it.
+
+**Container exits at start with "the same Grasshopper assembly is present more than once":**
+A plugin exists both in `setup/plugins/` and as a `LOCAL_PLUGINS` mount (or
+twice in `setup/plugins/`). Keep one — see [One source per plugin](#one-source-per-plugin).
+
+**A component fails at solve time with `TypeLoadException: Could not load type '...' from assembly '...'` although the plugin reported a clean load:**
+The running `.gha` is not the one you built. Almost always a stale copy —
+same cause as above; check `docker exec <container> find /root/.config/Grasshopper/Libraries -name '*.gha'`
+and compare hashes with your build output. Note that .NET metadata stores
+namespace and type name separately, so grepping binaries for the full type
+name from the error message finds nothing even when the reference is there.
 
 **"Connection refused" from Windows:**
 The server might be listening on localhost inside the container instead of

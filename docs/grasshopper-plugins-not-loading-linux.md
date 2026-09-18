@@ -7,9 +7,9 @@
 ## What happened
 
 We set up Rhino.Compute in a Docker container on Linux. Yak packages
-(EleFront, Pufferfish, Selva, SheepMetal) installed fine, and our own
-plugin builds (VektorFab, vektornode-gh-lib) were copied into the
-Grasshopper Libraries folder. The server started without complaints.
+(Selva among others) installed fine, and a few in-house `.gha` builds
+were copied into the Grasshopper Libraries folder. The server started
+without complaints.
 
 But every solve failed with `PayAttentionException`. That exception is
 thrown by our fork when a solve produces **zero outputs** — and checking
@@ -61,9 +61,9 @@ code runs for any plugin stored in a target-framework subfolder — the
 standard multi-target layout:
 
 ```
-Parapet/
+MyPlugin/
   net7.0/
-    Parapet.gha    ← this layout crashes the resolver on Linux
+    MyPlugin.gha    ← this layout crashes the resolver on Linux
 ```
 
 Worse: Grasshopper's scan loop has **no per-file error handling**, so a
@@ -114,6 +114,25 @@ If it bites, the known fix is a one-time startup warm-up via
 (the same blocking init path the script components use; ~0.3s for C#,
 ~10s for Python) — call it after Grasshopper loads in
 `Startup.RhinoCoreStartup`.
+
+## The opposite failure: the *wrong* plugin loads (September 2026)
+
+The mirror image of this case study is worth one paragraph, because it
+looks like a plugin bug and is not. `setup/plugins/` is gitignored, so a
+copy of a plugin dropped there stays invisible to `git status` and keeps
+being staged on every start — even after you moved to live-mounting the
+same plugin via `LOCAL_PLUGINS`. Both copies carry the same assembly
+name; Grasshopper loads whichever it scans first, and the startup log
+looks identical either way. The symptom is a component that "loaded
+fine" but throws `TypeLoadException: Could not load type '...' from
+assembly '...'` at solve time, referencing a type that only the stale
+build knew about. Hashing the `.gha` you *expect* to be loaded shows it
+matches your build, because it does — the other one is what runs.
+
+`start.sh` now replaces a same-named folder outright when staging a live
+mount, and refuses to start if the same `.gha` appears twice. Rule of
+thumb: one source per plugin — see "One source per plugin" in
+[setup/README.md](../setup/README.md).
 
 ## How to tell if you're hitting this
 

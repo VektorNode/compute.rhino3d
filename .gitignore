@@ -53,3 +53,6 @@ package/version/version.cs
 src/compute.sln.DotSettings.user
 setup/packages.json
 .claude/*/**
+
+# Test definitions — may contain proprietary geometry, never commit
+*.ghx

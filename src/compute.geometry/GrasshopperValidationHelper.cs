@@ -59,13 +59,8 @@ namespace compute.geometry
             }
             catch (Exception) { }
 
-            // VEKTORNODE: SELVA — Rhino writes .ghx with a UTF-8 BOM. Encoding.UTF8.GetString
-            // keeps that BOM as a leading U+FEFF, which the XML reader rejects with
-            // "Data at the root level is invalid. Line 1, position 1." Strip it before parsing.
-            var xml = new System.Text.UTF8Encoding(false).GetString(byteArray).TrimStart('﻿');
-
             var xmlArchive = new GH_Archive();
-            if (xmlArchive.Deserialize_Xml(xml))
+            if (xmlArchive.Deserialize_Xml(System.Text.Encoding.UTF8.GetString(byteArray)))
                 return xmlArchive;
 
             return null;

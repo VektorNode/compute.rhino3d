@@ -25,6 +25,7 @@ namespace compute.geometry
             app.MapGet("servertime", ServerTime);
             app.MapGet("plugins/rhino/installed", GetInstalledPluginsRhino);
             app.MapGet("plugins/gh/installed", GetInstalledPluginsGrasshopper);
+            app.MapGet("grasshopper/schema", GetGrasshopperSchema);
             app.MapPost("grasshopper/schema", GetGrasshopperSchema);
             app.MapPost("grasshopper/schema/url", GetGrasshopperSchemaFromUrl);
             app.MapPost("cache/purge", PurgeCache);

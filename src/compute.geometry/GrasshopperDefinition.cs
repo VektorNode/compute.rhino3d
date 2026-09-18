@@ -389,7 +389,8 @@ namespace compute.geometry
                                 BuildAndAssignContextualTree(contextualParameter, tree, DeserializeGeometry);
                                 break;
                             ////////////////////////////////////////////////
-                            /// Selva Specific Contextual Inputs
+                            /// VEKTORNODE: IO-HANDLERS — Selva Specific Contextual Inputs
+                            /// (Color / File / ValueList — none of these exist upstream).
                             ////////////////////////////////////////////////
                             // Color and File arrive as (possibly escaped) JSON strings; DeserializeText
                             // already does the JsonConvert-with-Regex.Unescape fallback these need.
@@ -904,7 +905,10 @@ namespace compute.geometry
                 outputs.Add(new IoParamSchema
                 {
                     Name = o.Key,
-                    ParamType = o.Value.TypeName
+                    ParamType = o.Value.TypeName,
+                    // VEKTORNODE: PARAM-ID — output objects are looked up by Id client-side, so the
+                    // schema must carry the same Instance Guid that ResthopperObject.Id is tagged with.
+                    Id = o.Value.InstanceGuid.ToString()
                 });
             }
 
@@ -1064,6 +1068,22 @@ namespace compute.geometry
 
             public object GetDefault()
             {
+                // VEKTORNODE: IO-HANDLERS — a contextual parameter may declare its own default
+                // (e.g. the pre-selected entry of a ValueList). The upstream fallback below derives
+                // the default from the serialized data tree, which has no notion of a selection, so
+                // without this a ValueList ships its options with nothing selected.
+                if (Param is IGH_ContextualParameter contextualParam)
+                {
+                    var method = contextualParam.GetType().GetMethod("GetDefaultValue");
+                    if (method != null)
+                    {
+                        var result = method.Invoke(contextualParam, null);
+                        if (result != null)
+                            return result; // Return the string directly
+                    }
+                }
+
+                // Fall back to original behavior (serialize data tree)
                 return defaultValue;
             }
 

@@ -37,6 +37,22 @@ docker start rhino-compute-x9
 ./docker-status.sh           # confirm it actually came up — don't trust silence
 ```
 
+## What to run after a change
+
+| You changed                                   | Run                                  |
+| --------------------------------------------- | ------------------------------------ |
+| `.env` (`CPUS`, `CHILD_COUNT`, `PORT`, token…) | `NO_BUILD=1 ./docker-launch.sh`      |
+| `packages.json` (yak versions)                 | `NO_BUILD=1 ./docker-launch.sh`      |
+| Rebuilt a live-mounted plugin                  | `docker restart rhino-compute-x9`    |
+| `start.sh` / `Dockerfile`                      | `./docker-launch.sh`                 |
+| Pushed compute source changes                  | `FRESH=1 ./docker-launch.sh`         |
+
+`docker restart` re-runs `start.sh`, so it re-stages plugins and re-reads
+`packages.json` — but it does **not** pick up `.env`. Those values become
+`docker run` flags (`--cpus`, `-p`, `-e`, `-v`), fixed when the container is
+created, so changing them means recreating it. `NO_BUILD=1` skips the image
+build, so that takes ~30s rather than minutes.
+
 ## Changing plugins or packages
 
 Edit `setup/packages.json` (yak versions, local plugin names), then

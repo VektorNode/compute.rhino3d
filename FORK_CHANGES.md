@@ -20,6 +20,12 @@ Tags used:
 - **SELVA FIX** — a bug fix relative to upstream (wrapped in BEGIN/END banners).
 - **PARAM-ID** — threads the source Grasshopper parameter's Instance Guid through the IO model.
 - **IO-HANDLERS** — extra input/output type handlers + schema metadata not in upstream.
+- **CACHE-ERRORED-SOLVES** — opt-in caching of errored-but-completed solves.
+
+> **Auditing the delta against upstream:** compare with
+> `git diff --ignore-all-space upstream/8.x 8.x.selva`. A plain `git diff` also
+> reports files that differ only in line endings — see the note in
+> `.gitattributes` for why.
 
 ---
 
@@ -78,6 +84,60 @@ enumerated values) carried on the schema. Not in upstream/8.x.
 Any Goo implementing `ISelvaSerializableGoo` (matched by interface name) owns its own wire
 format. The block at ~L659 is marked **DEPRECATED — delete in a future major** (legacy
 serialization of older Selva output Goos).
+
+### 8. Dead-child eviction + proxy retry (SELVA FIX)
+**Files:** `src/rhino.compute/ComputeChildren.cs` (`EvictChild`), `src/rhino.compute/ReverseProxy.cs`
+(`/child-exiting` endpoint, retry loop in `ProxyRequest`), `src/compute.geometry/Shutdown.cs`
+(`NotifyParentExiting`)
+
+A child that had self-exited on idle timeout stayed in the round-robin pool, so every request
+routed to it failed with "connection refused" until a manual `/shutdown-children`. Three parts:
+a child POSTs `/child-exiting` just before it stops listening; the parent evicts that port from
+the pool; and the proxy evicts-and-retries on `HttpRequestError.ConnectionError`. The retry only
+fires when the connection was never established, so no solve is ever duplicated.
+
+Also logs the child's response body on any non-success status, so 500s from compute.geometry are
+diagnosable from the parent log rather than only forwarded to the caller.
+
+### 9. Solve-result cache purge frees native geometry (SELVA FIX)
+**File:** `src/compute.geometry/DataCache.cs` — `PurgeSolveResults`
+
+`resultsCache.Trim(100)` is best-effort (it may leave entries behind) and drops only the managed
+reference. URL-data entries hold a `Tuple<JToken, object>` whose `Item2` may be a `GeometryBase`
+wrapping unmanaged C++ memory, so the purge did not actually relieve memory pressure. Now
+enumerates and removes every key explicitly and disposes any `IDisposable` payload.
+
+### 10. Errored-solve caching, opt-in (CACHE-ERRORED-SOLVES)
+**Files:** `src/compute.geometry/IO/Schema.cs`, `src/compute.geometry/ResthopperEndpoints.cs`
+
+By default an errored solve is not served from cache; this adds the opt-in flag plus the
+detection of whether a cached solve-result JSON came from an errored-but-completed solve.
+
+### 11. Stable error code on 500s (SELVA)
+**File:** `src/compute.geometry/Startup.cs`
+
+Adds a machine-readable `code` to the error body in **both** debug and production. The human
+`message` is scrubbed in prod, so the code is the only thing a client can classify on. A
+stale-pointer cache miss surfaces as `definition_not_cached`, which the `@selvajs/compute`
+client uses to transparently re-upload the definition.
+
+### 12. Larger default max request size (SELVA)
+**File:** `src/compute.geometry/Config.cs`
+
+`RHINO_COMPUTE_MAX_REQUEST_SIZE` default raised from 50 MB to 300 MB.
+
+---
+
+## Non-source divergence
+
+Repo/tooling files with no upstream counterpart, or deliberately changed:
+
+- `.editorconfig`, `.gitattributes`, `.vscode/settings.json`, `.gitignore` additions — local
+  conventions.
+- `.github/workflows/workflow_ci.yml` — artifact upload gated on `8.x.selva` instead of `8.x`.
+- `script/update_compute_server/` — Selva deployment script + README.
+- `TROUBLESHOOTING-DUPLICATE-LANGUAGE.md` — runbook for the RhinoCode duplicate-language 500.
+- `src/compute.geometry/compute.geometry.csproj` — `<Version>`.
 
 ---
 

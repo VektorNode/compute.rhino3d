@@ -1,11 +1,19 @@
-# Normalize line endings to match upstream mcneel/compute.rhino3d (CRLF for
-# source) so checkouts/commits don't introduce whole-file line-ending diffs.
-# Without this, core.autocrlf differences between machines cause drift.
+# Line-ending policy, so core.autocrlf differences between machines don't
+# cause whole-file diffs.
+#
+# Note on how this interacts with upstream (mcneel/compute.rhino3d): upstream
+# stores CRLF *in the repo*, while `text=auto` below normalizes text to LF in
+# the index. `eol=crlf` only controls what lands in the working tree on
+# checkout — it does NOT make the committed blob CRLF. So for any file we have
+# ever re-staged, our blob differs from upstream's byte-for-byte even when the
+# content is identical, and `git diff upstream/8.x` reports the whole file as
+# changed. Use `git diff --ignore-all-space` (or compare `tr -d '\r'` hashes)
+# when auditing the real fork delta against upstream.
 
-# Default: let git decide, but normalize text on commit.
+# Default: normalize text to LF in the index on commit.
 * text=auto
 
-# Source and text files — force CRLF to match upstream working tree.
+# Source and text files — check out as CRLF (working tree only).
 *.cs        text eol=crlf
 *.csproj    text eol=crlf
 *.sln       text eol=crlf

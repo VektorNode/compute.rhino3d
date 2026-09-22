@@ -1,20 +1,15 @@
 # compute.rhino3d — Vektornode / Selva fork
 
 This repo is a **fork** of McNeel's [compute.rhino3d](https://github.com/mcneel/compute.rhino3d).
-
-| Branch | Tracks | Notes |
-| --- | --- | --- |
-| `9.x.selva` | `upstream/9.x` | Linux/Docker deployment lives here |
-| `8.x.selva` | `upstream/8.x` | Windows/IIS production |
+This branch is `9.x.selva`, tracking `upstream/9.x`.
 
 Remotes: `origin` = VektorNode fork, `upstream` = mcneel.
 
 ## Rule: document every upstream divergence
 
 **Any change that makes this fork differ from upstream must be documented in `FORK_CHANGES.md`,
-on that branch, in the same commit that makes the change.** Both `8.x.selva` and `9.x.selva`
-carry their own copy. This applies to small and temporary changes too — those are the ones that
-get forgotten and then cost real time during the next upstream merge.
+in the same commit that makes the change.** This applies to small and temporary changes too —
+those are the ones that get forgotten and then cost real time during the next upstream merge.
 
 For a source change:
 
@@ -24,8 +19,6 @@ For a source change:
 2. Add or update a numbered section in `FORK_CHANGES.md` covering **what upstream did, why that
    was wrong or insufficient for us, and what we do instead.** The "why" is what has value
    later; the diff already shows the "what".
-3. If the change applies to the other branch too, either port it or note that it is
-   branch-specific.
 
 Tooling, scripts and docs with no upstream counterpart go under **Non-source divergence**.
 

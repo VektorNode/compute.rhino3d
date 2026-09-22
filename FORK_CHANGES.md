@@ -31,10 +31,6 @@ Tags used:
 > `git diff --ignore-all-space upstream/9.x 9.x.selva`. A plain `git diff` also reports files
 > that differ only in line endings, which overstates the delta.
 
-> **Relationship to 8.x:** `8.x.selva` carries its own `FORK_CHANGES.md`. Items 1–8 below exist
-> on both branches; items 9–12 are 9.x-only (Linux/Docker). When you change shared behaviour,
-> check whether the other branch needs the same change and document it there too.
-
 ---
 
 ## Source changes
@@ -116,7 +112,7 @@ reference. URL-data entries hold a `Tuple<JToken, object>` whose `Item2` may be 
 wrapping unmanaged C++ memory, so the purge did not actually relieve memory pressure. Now
 enumerates and removes every key explicitly and disposes any `IDisposable` payload.
 
-### 12. Linux Grasshopper plugin loading — diagnostics + quarantine (SELVA FIX, 9.x-only)
+### 12. Linux Grasshopper plugin loading — diagnostics + quarantine (SELVA FIX)
 **File:** `src/compute.geometry/Startup.cs` (`#if LINUX` block)
 
 Two problems, both previously silent:
@@ -135,7 +131,7 @@ Note: external libraries are loaded by touching the `Instances.ComponentServer` 
 GH's own guarded once-only load. Do **not** call `LoadExternalFiles()` as well — that loads every
 assembly twice and floods the component server with object-ID conflicts.
 
-### 13. `System.Management` package reference (9.x-only)
+### 13. `System.Management` package reference
 **File:** `src/compute.geometry/compute.geometry.csproj`
 
 Added under the Windows-only `ItemGroup`.
@@ -150,9 +146,7 @@ Tooling and docs with no upstream counterpart:
   `start.sh`, Multipass launchers and guides, `infrastructure/` (Terraform), `testing/`
   (startup-timing and comparison scripts), `plugins/`, `.env.example`, `packages.example.json`.
 - `docs/quick-start-docker.md`, `docs/grasshopper-plugins-not-loading-linux.md`.
-- `COMPUTE8_DIFFERENCES.md` — an older, auto-generated comparison of the Compute8 branch against
-  `upstream/8.x`. Superseded by this file and by `8.x.selva`'s own `FORK_CHANGES.md`; kept for
-  history, not maintained.
+- `COMPUTE8_DIFFERENCES.md` — a stale leftover from an older branch; not maintained.
 - `.gitattributes`, `.gitignore` additions — local conventions.
 - `src/compute.geometry/compute.geometry.csproj` — `<Version>` (currently 9.3.0).
 
@@ -176,9 +170,6 @@ For a source change:
 2. Add or update a numbered section here saying **what upstream did, why that was wrong or
    insufficient for us, and what we do instead.** The "why" is the part that has value later;
    the diff already shows the "what".
-3. If the same behaviour applies to the other branch (`8.x.selva`), either port it or note
-   explicitly that it is branch-specific.
-
 For tooling, scripts or docs with no upstream counterpart, add them under
 **Non-source divergence**.
 

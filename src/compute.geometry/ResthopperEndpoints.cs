@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using GH_IO.Serialization;
 using Grasshopper.Kernel;
 using Grasshopper.Kernel.Types;
@@ -114,6 +115,41 @@ namespace compute.geometry
             return false;
         }
 
+        // ── BEGIN VEKTORNODE: SELVA — live events ──
+        /// <summary>
+        ///     The callback target the document may use, or an empty target when the request
+        ///     carries none or names a host outside <see cref="Config.EventSinkHosts"/>. A dropped
+        ///     target is logged once per request so an operator can tell "not configured" from
+        ///     "blocked" without turning on Debug.
+        /// </summary>
+        static SelvaEventTarget SelvaEventTargetFor(Schema input)
+        {
+            var target = input.SelvaEvents;
+            if (target == null || string.IsNullOrWhiteSpace(target.Url))
+                return new SelvaEventTarget();
+
+            if (!Uri.TryCreate(target.Url, UriKind.Absolute, out var uri)
+                || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+            {
+                Serilog.Log.Warning("selvaevents url is not an absolute http(s) URL; dropped");
+                return new SelvaEventTarget();
+            }
+
+            var allowed = Config.EventSinkHosts.Any(h =>
+                string.Equals(h, uri.Host, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(h, uri.Authority, StringComparison.OrdinalIgnoreCase));
+            if (!allowed)
+            {
+                Serilog.Log.Warning(
+                    "selvaevents host {Host} is not in RHINO_COMPUTE_EVENT_SINK_HOSTS; dropped",
+                    uri.Authority);
+                return new SelvaEventTarget();
+            }
+
+            return target;
+        }
+        // ── END   VEKTORNODE: SELVA — live events ──
+
         static string GrasshopperSolveHelper(Schema input, string body, System.Diagnostics.Stopwatch stopwatch, HttpContext ctx)
         {
             string httpType = ctx.Request.IsHttps ? "HTTPS" : "HTTP";
@@ -163,6 +199,18 @@ namespace compute.geometry
             }
             int recursionLevel = input.RecursionLevel + 1;
             definition.Definition.DefineConstant("ComputeRecursionLevel", new Grasshopper.Kernel.Expressions.GH_Variant(recursionLevel));
+
+            // ── BEGIN VEKTORNODE: SELVA — live events ──
+            // Defined on EVERY request, empty when the block is absent or its host is not
+            // allowlisted: cached definitions are live GH_Documents reused across requests, and
+            // a constant left over from the previous solve would post that solve's events to
+            // another caller's callback.
+            var eventTarget = SelvaEventTargetFor(input);
+            definition.Definition.DefineConstant("SelvaEventUrl", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.Url ?? string.Empty));
+            definition.Definition.DefineConstant("SelvaSolveId", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.SolveId ?? string.Empty));
+            definition.Definition.DefineConstant("SelvaEventToken", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.Token ?? string.Empty));
+            // ── END   VEKTORNODE: SELVA — live events ──
+
             definition.SetInputs(input.Values);
             long decodeTime = stopwatch.ElapsedMilliseconds;
             stopwatch.Restart();

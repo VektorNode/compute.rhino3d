@@ -1,8 +1,11 @@
-# Fork changes — Vektornode / Selva vs. upstream `compute.rhino3d`
+# Fork changes — Vektornode / Selva vs. upstream `compute.rhino3d` (8.x)
 
-This is a **fork** of McNeel's [compute.rhino3d](https://github.com/mcneel/compute.rhino3d).
-Every divergence from upstream is tagged in source with a `VEKTORNODE:` comment so it can be
-found by grep, and listed here so the whole delta is visible in one place.
+This is a **fork** of McNeel's [compute.rhino3d](https://github.com/mcneel/compute.rhino3d),
+branch `8.x.selva`, tracking `upstream/8.x`.
+
+**Every divergence from upstream must be documented here.** See
+[Rule: document every upstream divergence](#rule-document-every-upstream-divergence).
+Source changes are also tagged with a `VEKTORNODE:` comment so they can be found by grep.
 
 > **Find every change in source:**
 > ```
@@ -26,6 +29,10 @@ Tags used:
 > `git diff --ignore-all-space upstream/8.x 8.x.selva`. A plain `git diff` also
 > reports files that differ only in line endings — see the note in
 > `.gitattributes` for why.
+
+> **Relationship to 9.x:** `9.x.selva` carries its own `FORK_CHANGES.md`. Most items below exist
+> on both branches; the Linux/Docker work is 9.x-only. When you change shared behaviour, check
+> whether the other branch needs the same change and document it there too.
 
 ---
 
@@ -141,4 +148,38 @@ Repo/tooling files with no upstream counterpart, or deliberately changed:
 
 ---
 
-_Keep this file in sync: when you add or remove a `VEKTORNODE:` marker in source, update the list above._
+## Rule: document every upstream divergence
+
+**Any change that makes this fork differ from upstream must be recorded here, in the same commit
+that makes the change.** No exceptions for "small" or "temporary" changes — those are exactly the
+ones that get forgotten and then cost an hour during the next upstream merge.
+
+For a source change:
+
+1. Tag it in source with a `VEKTORNODE: <TAG> — <why>` comment (BEGIN/END banners for blocks).
+2. Add or update a numbered section here saying **what upstream did, why that was wrong or
+   insufficient for us, and what we do instead.** The "why" is the part that has value later;
+   the diff already shows the "what".
+3. If the same behaviour applies to the other branch (`9.x.selva`), either port it or note
+   explicitly that it is branch-specific.
+
+For tooling, scripts or docs with no upstream counterpart, add them under
+**Non-source divergence**.
+
+When removing a divergence — because upstream adopted it, or we no longer need it — delete its
+section here in the same commit.
+
+### After merging upstream
+
+Re-audit, because a merge can silently make one of our changes redundant:
+
+```
+git fetch upstream
+git diff --ignore-all-space --stat upstream/8.x 8.x.selva
+grep -rn "VEKTORNODE" src/
+```
+
+Every file in that diff should map to a section above, and every `VEKTORNODE` marker should
+correspond to one. If upstream has adopted something we carried, drop our version rather than
+keeping a duplicate. Then bump `<Version>` in `src/compute.geometry/compute.geometry.csproj`
+(the only place the version lives).

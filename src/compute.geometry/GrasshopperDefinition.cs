@@ -811,14 +811,19 @@ namespace compute.geometry
                     schema.Errors.Add(errorMsg);
                     HasErrors = true;
                 }
+                // ── BEGIN VEKTORNODE: SELVA FIX — warnings reported outside Debug ──
+                // Upstream gated this whole block on Config.Debug, so a production server never
+                // reported a warning. The response array is filled unconditionally; only the log
+                // line stays debug-only.
+                foreach (var msg in obj.RuntimeMessages(GH_RuntimeMessageLevel.Warning))
+                {
+                    string warningMsg = $"{msg}: component \"{obj.Name}\" ({obj.InstanceGuid})";
+                    if (Config.Debug) Log.Warning(warningMsg);
+                    schema.Warnings.Add(warningMsg);
+                }
+                // ── END   VEKTORNODE: SELVA FIX — warnings reported outside Debug ──
                 if (Config.Debug)
                 {
-                    foreach (var msg in obj.RuntimeMessages(GH_RuntimeMessageLevel.Warning))
-                    {
-                        string warningMsg = $"{msg}: component \"{obj.Name}\" ({obj.InstanceGuid})";
-                        Log.Warning(warningMsg);
-                        schema.Warnings.Add(warningMsg);
-                    }
                     foreach (var msg in obj.RuntimeMessages(GH_RuntimeMessageLevel.Remark))
                     {
                         LogDebug($"Remark in grasshopper component: \"{obj.Name}\" ({obj.InstanceGuid}): {msg}");

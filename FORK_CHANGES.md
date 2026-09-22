@@ -136,6 +136,41 @@ assembly twice and floods the component server with object-ID conflicts.
 
 Added under the Windows-only `ItemGroup`.
 
+### 14. Live-event callback target as document constants (SELVA)
+**Files:** `src/compute.geometry/IO/Schema.cs` (`SelvaEventTarget`, `Schema.SelvaEvents`),
+`src/compute.geometry/ResthopperEndpoints.cs` (`SelvaEventTargetFor`, the `DefineConstant` block
+next to `ComputeRecursionLevel`), `src/compute.geometry/Config.cs` (`EventSinkHosts`)
+
+Upstream has no way for a component to talk to anyone during a solve: the solve is one blocking
+`NewSolution` inside one HTTP request, and the parent proxy buffers the whole response. Selva
+wants mid-solve events (diagnostics, progress, an abort flag coming back) without streaming
+through the proxy. So the solve request may carry
+`selvaevents: { url, solveId, token }`, and compute hands the three values to the document as
+constants (`SelvaEventUrl`, `SelvaSolveId`, `SelvaEventToken`) the same way it already hands
+`ComputeRecursionLevel`. The Selva plugin running inside the solve reads them and does the
+networking; compute itself never opens a connection.
+
+Two rules carry the safety:
+
+- The constants are defined on **every** request, as empty strings when the block is absent.
+  Cached definitions are live `GH_Document`s reused across requests; a leftover constant would
+  send one caller's events to another caller's callback.
+- The URL's host must be in `RHINO_COMPUTE_EVENT_SINK_HOSTS`, which defaults to loopback
+  (`localhost,127.0.0.1,[::1]`) and nothing else. A same-machine Selva server therefore works
+  out of the box, while any sink that is not this host — a LAN address included — stays denied
+  until an operator lists it. Setting the variable replaces the default rather than extending
+  it. Only an API-key holder can send a solve request, so this is defence in depth against a
+  leaked key becoming an SSRF hop.
+
+### 15. Warnings reported outside Debug (SELVA FIX)
+**File:** `src/compute.geometry/GrasshopperDefinition.cs` — `LogRuntimeMessages`
+
+Upstream only collects `GH_RuntimeMessageLevel.Warning` into the response's `warnings[]` when
+`Config.Debug` is on, so a production server never reports a warning at all. Selva shows
+warnings to the user and lets them decide whether to trust the result, which is meaningless if
+the array is always empty. Warnings are now collected unconditionally; the Serilog line for them
+stays behind `Debug` so production logs are not flooded. Remarks are unchanged (log only).
+
 ---
 
 ## Non-source divergence

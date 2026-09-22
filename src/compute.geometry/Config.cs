@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace compute.geometry
 {
@@ -87,6 +88,23 @@ namespace compute.geometry
         /// </summary>
         public static bool LoadGrasshopper { get; private set; }
 
+        /// <summary>
+        /// RHINO_COMPUTE_EVENT_SINK_HOSTS: hosts (comma or semicolon separated, optional
+        /// `host:port`) a Selva-family plugin may POST mid-solve events to. The callback URL
+        /// arrives in the solve request's `selvaevents` block; a URL whose host is not listed
+        /// here is dropped before it reaches the document. Only an API-key holder can send a
+        /// solve request, so this is defence in depth against a leaked key being used as an
+        /// SSRF hop, in the spirit of RHINO_COMPUTE_BLOCK_PRIVATE_URLS.
+        ///
+        /// Defaults to loopback, which covers a Selva server on this same machine without
+        /// opening anything: a callback there can only reach this host. Any other sink,
+        /// including a LAN address, must be listed explicitly. Setting the variable replaces
+        /// the default rather than adding to it, so keep loopback in the list if you want it.
+        /// A blank value reads as unset and keeps the default; to refuse every sink, set it to
+        /// a host no callback can name, e.g. `none`.
+        /// </summary>
+        public static string[] EventSinkHosts { get; private set; }
+
         public static string[] GetDeprecationWarnings() => warnings.ToArray();
 
         /// <summary>
@@ -110,6 +128,12 @@ namespace compute.geometry
             // VEKTORNODE: SELVA — default headless doc creation ON (upstream default is false).
             CreateHeadlessDoc = GetEnvironmentVariable<bool>(RHINO_COMPUTE_CREATE_HEADLESS_DOC, true);
             LoadGrasshopper = GetEnvironmentVariable<bool>(RHINO_COMPUTE_LOAD_GRASSHOPPER, true);
+            // VEKTORNODE: SELVA — live events.
+            EventSinkHosts = GetEnvironmentVariable(RHINO_COMPUTE_EVENT_SINK_HOSTS, DEFAULT_EVENT_SINK_HOSTS)
+                .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(h => h.Trim())
+                .Where(h => h.Length > 0)
+                .ToArray();
 
 #if DEBUG
             Debug = true;
@@ -139,6 +163,11 @@ namespace compute.geometry
         const string RHINO_COMPUTE_DEBUG = "RHINO_COMPUTE_DEBUG";
         const string RHINO_COMPUTE_CREATE_HEADLESS_DOC = "RHINO_COMPUTE_CREATE_HEADLESS_DOC";
         const string RHINO_COMPUTE_LOAD_GRASSHOPPER = "RHINO_COMPUTE_LOAD_GRASSHOPPER";
+        const string RHINO_COMPUTE_EVENT_SINK_HOSTS = "RHINO_COMPUTE_EVENT_SINK_HOSTS";
+
+        // Host-only entries, so any port on the loopback interface matches: a dev Selva server
+        // changes port far more often than it changes machine.
+        const string DEFAULT_EVENT_SINK_HOSTS = "localhost,127.0.0.1,[::1]";
 
         // deprecated
         const string COMPUTE_BIND_URLS = "COMPUTE_BIND_URLS";

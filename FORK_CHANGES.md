@@ -170,6 +170,27 @@ stays behind `Debug` so production logs are not flooded. Remarks are unchanged (
 
 ---
 
+### 15. Solve outcome returned as a `selva` block (SELVA)
+**Files:** `src/compute.geometry/IO/Schema.cs` (`Schema.Selva`),
+`src/compute.geometry/ResthopperEndpoints.cs` (`SelvaOutcome` next to the #13 constants),
+`src/compute.geometry/GrasshopperDefinition.cs` (`Solve`, `ReadSelvaOutcome`)
+
+Compute flattens runtime messages to strings, so Selva used to recover "a Message component
+refused this solve" and "the author wrote this" from markers in the text, and could not report an
+aborted solve or a remark at all. Now the Selva plugin writes its verdict,
+`{ diagnostics, blocked, aborted }`, as JSON into a `SelvaOutcome` document constant at
+`SolutionEnd`, and compute returns it verbatim as `selva: { outcome }` in the solve response.
+Compute never interprets the messages; the plugin decides.
+
+- `SelvaOutcome` is defined empty on **every** request, like the #13 constants, so a cached
+  document cannot return the previous solve's verdict.
+- When the outcome says `blocked` or `aborted`, `values` is returned empty and the
+  "No outputs found" check is skipped: the client discards those outputs, and serializing them
+  cost megabytes of display data for nothing. `errors`/`warnings` and the HTTP status are
+  unchanged, so a client that ignores `selva` still sees the markers.
+- No Selva plugin, an older one, or a definition without a Selva component: no constant is
+  written, no `selva` block, behaviour as before.
+
 ## Non-source divergence
 
 Repo/tooling files with no upstream counterpart, or deliberately changed:

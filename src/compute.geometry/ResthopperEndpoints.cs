@@ -209,6 +209,9 @@ namespace compute.geometry
             definition.Definition.DefineConstant("SelvaEventUrl", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.Url ?? string.Empty));
             definition.Definition.DefineConstant("SelvaSolveId", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.SolveId ?? string.Empty));
             definition.Definition.DefineConstant("SelvaEventToken", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.Token ?? string.Empty));
+            // Empty for the same reason: the plugin writes the solve's verdict here, and a stale
+            // one would be returned as this solve's.
+            definition.Definition.DefineConstant("SelvaOutcome", new Grasshopper.Kernel.Expressions.GH_Variant(string.Empty));
             // ── END   VEKTORNODE: SELVA — live events ──
 
             definition.SetInputs(input.Values);

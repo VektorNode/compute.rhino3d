@@ -613,6 +613,25 @@ namespace compute.geometry
 
             LogRuntimeMessages(Definition.ActiveObjects(), outputSchema);
 
+            // ── BEGIN VEKTORNODE: SELVA — solve outcome ──
+            // The plugin decides whether this solve produced a result; compute only carries the
+            // verdict and honours it. A blocked or aborted solve returns no values: the client
+            // discards them anyway, and serializing them can cost megabytes of display data.
+            var selvaOutcome = ReadSelvaOutcome();
+            if (selvaOutcome != null)
+                outputSchema.Selva = new Newtonsoft.Json.Linq.JObject { ["outcome"] = selvaOutcome };
+            bool withholdValues = selvaOutcome != null &&
+                ((bool?)selvaOutcome["blocked"] == true || (bool?)selvaOutcome["aborted"] == true);
+            if (withholdValues)
+            {
+                if (outputSchema.Warnings.Count < 1)
+                    outputSchema.Warnings = null;
+                if (outputSchema.Errors.Count < 1)
+                    outputSchema.Errors = null;
+                return outputSchema;
+            }
+            // ── END   VEKTORNODE: SELVA — solve outcome ──
+
             foreach (var kvp in output)
             {
                 var param = kvp.Value;
@@ -647,6 +666,26 @@ namespace compute.geometry
                 outputSchema.Errors = null;
 
             return outputSchema;
+        }
+
+        // VEKTORNODE: SELVA — solve outcome. Null when the plugin wrote none (no Selva plugin, an
+        // older one, or a definition without a Selva component) or the text is not an object.
+        private Newtonsoft.Json.Linq.JObject ReadSelvaOutcome()
+        {
+            try
+            {
+                if (!Definition.ConstantServer.TryGetValue("SelvaOutcome", out var value))
+                    return null;
+                var text = value._String;
+                if (string.IsNullOrWhiteSpace(text))
+                    return null;
+                return Newtonsoft.Json.Linq.JObject.Parse(text);
+            }
+            catch (Exception ex) when (ex is JsonException || ex is InvalidCastException)
+            {
+                Serilog.Log.Warning("SelvaOutcome constant is not a JSON object; ignored");
+                return null;
+            }
         }
 
         private static object SerializeDataTree(IGH_Structure data, Guid paramId, string name, int rhinoVersion = 7)

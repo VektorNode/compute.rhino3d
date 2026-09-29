@@ -81,6 +81,12 @@ namespace Resthopper.IO
         // does the networking. Input-only; never echoed back.
         [JsonProperty(PropertyName = "selvaevents", DefaultValueHandling = DefaultValueHandling.Ignore)]
         public SelvaEventTarget SelvaEvents { get; set; }
+
+        // VEKTORNODE: SELVA — solve outcome. Output-only: `{ outcome }`, where outcome is the
+        // Selva plugin's verdict on the solve, copied verbatim from the `SelvaOutcome` document
+        // constant (see GrasshopperDefinition.Solve). Absent when no Selva plugin wrote one.
+        [JsonProperty(PropertyName = "selva", NullValueHandling = NullValueHandling.Ignore)]
+        public Newtonsoft.Json.Linq.JObject Selva { get; set; }
     }
 
     // VEKTORNODE: SELVA — live events.

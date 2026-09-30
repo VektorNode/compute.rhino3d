@@ -59,8 +59,11 @@ namespace compute.geometry
             }
             catch (Exception) { }
 
+            // Encoding.GetString keeps a leading BOM, which Deserialize_Xml rejects as
+            // "Data at the root level is invalid". Grasshopper writes .ghx with one.
+            var xml = System.Text.Encoding.UTF8.GetString(byteArray).TrimStart('﻿');
             var xmlArchive = new GH_Archive();
-            if (xmlArchive.Deserialize_Xml(System.Text.Encoding.UTF8.GetString(byteArray)))
+            if (xmlArchive.Deserialize_Xml(xml))
                 return xmlArchive;
 
             return null;

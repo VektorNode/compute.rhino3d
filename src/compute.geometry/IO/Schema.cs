@@ -61,6 +61,32 @@ namespace Resthopper.IO
         // Return errors from GH
         [JsonProperty(PropertyName = "errors", DefaultValueHandling = DefaultValueHandling.Ignore)]
         public List<string> Errors { get; set; } = new List<string>();
+
+        // VEKTORNODE: SELVA — live events. Where a Selva-family plugin running inside this
+        // solve may POST mid-solve events. Compute never sends anything itself; it hands the
+        // three values to the document as constants (see GrasshopperSolveHelper) and the plugin
+        // does the networking. Input-only; never echoed back.
+        [JsonProperty(PropertyName = "selvaevents", DefaultValueHandling = DefaultValueHandling.Ignore)]
+        public SelvaEventTarget SelvaEvents { get; set; }
+
+        // VEKTORNODE: SELVA — solve outcome. Output-only: `{ outcome }`, where outcome is the
+        // Selva plugin's verdict on the solve, copied verbatim from the `SelvaOutcome` document
+        // constant (see GrasshopperDefinition.Solve). Absent when no Selva plugin wrote one.
+        [JsonProperty(PropertyName = "selva", NullValueHandling = NullValueHandling.Ignore)]
+        public Newtonsoft.Json.Linq.JObject Selva { get; set; }
+    }
+
+    // VEKTORNODE: SELVA — live events.
+    public class SelvaEventTarget
+    {
+        [JsonProperty(PropertyName = "url")]
+        public string Url { get; set; }
+
+        [JsonProperty(PropertyName = "solveId")]
+        public string SolveId { get; set; }
+
+        [JsonProperty(PropertyName = "token")]
+        public string Token { get; set; }
     }
 
     public class IoQuerySchema

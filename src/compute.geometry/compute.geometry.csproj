@@ -14,7 +14,7 @@
     <AppendTargetFrameworkToOutputPath>False</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>False</AppendRuntimeIdentifierToOutputPath>
     <EnableWindowsTargeting>True</EnableWindowsTargeting>
-    <Version>8.11.0</Version>
+    <Version>8.12.0</Version>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Debug'">
     <OutputPath>..\bin\Debug\$(AssemblyName)</OutputPath>

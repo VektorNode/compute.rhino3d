@@ -40,12 +40,25 @@ RUN GDIP="$(dpkg -L libgdiplus | grep -m1 'libgdiplus\.so')" \
 # ============================================================
 # 3. Add McNeel package repo and install Rhino runtime libs
 # ============================================================
+# `stable main` resolves rhino3d to the newest nightly, so pin a known-good one.
+# From 9.0.26272 on, loading a GHA built against an older RhinoCommon major runs
+# PlugIn.RunCompat, which calls RhinoApp.InvokeRequired: a Linux stub that aborts
+# compute.geometry. Empty = track latest.
+ARG RHINO3D_VERSION=9.0.26271.7019
+
 RUN wget -qO- https://mcneel-packages.s3.amazonaws.com/mcneel-packages.gpg.key \
       | gpg --dearmor -o /usr/share/keyrings/mcneel-archive-keyring.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/mcneel-archive-keyring.gpg] \
       https://mcneel-packages.s3.amazonaws.com/deb stable main" \
       | tee /etc/apt/sources.list.d/mcneel.list \
-    && apt update && apt install -y rhino-compute yak-cli \
+    && apt update \
+    # rhino3d comes in as a rhino-compute dependency; install and hold the pin
+    # first or apt resolves it to latest.
+    && if [ -n "${RHINO3D_VERSION}" ]; then \
+         apt install -y --allow-downgrades "rhino3d=${RHINO3D_VERSION}" \
+         && apt-mark hold rhino3d; \
+       fi \
+    && apt install -y rhino-compute yak-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # ============================================================

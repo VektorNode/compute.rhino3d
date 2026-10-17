@@ -255,6 +255,52 @@ cd /home/rhino-compute-src/src
 # Without this, it only listens on localhost (container-internal).
 CHILD_COUNT="${RHINO_COMPUTE_CHILD_COUNT:-1}"
 
+# ------------------------------------------------------------
+# Warm every compute.geometry child with one serial /io the
+# moment its port opens (at boot, and again whenever a child is
+# respawned after a crash or idle shutdown).
+#
+# A cold child that receives several requests at once can abort
+# in native code ("double free or corruption") mid-request; the
+# proxy then answers 500 for every request in flight. One request
+# on its own initializes whatever is racing, after which bursts
+# are safe. The proxy routes to a child as soon as its port opens,
+# so this narrows the cold window rather than closing it.
+# ------------------------------------------------------------
+WARMUP_GH=/home/rhino-compute-src/src/hops/definitions/SimpleDelaunayMesh.gh
+WARMUP_BODY=/tmp/warmup-io.json
+
+if [ -f "$WARMUP_GH" ]; then
+    jq -n --rawfile algo <(base64 -w0 "$WARMUP_GH") '{algo: $algo, pointer: null}' > "$WARMUP_BODY"
+    (
+        warm_hdr=()
+        [ -n "$RHINO_COMPUTE_KEY" ] && warm_hdr=(-H "RhinoComputeKey: $RHINO_COMPUTE_KEY")
+        # Ports are assigned first-free from 6001, so a respawn can land past CHILD_COUNT.
+        last_port=$((6000 + CHILD_COUNT * 2))
+        declare -A warm
+        while true; do
+            for port in $(seq 6001 "$last_port"); do
+                curl -s -o /dev/null -m 2 "http://localhost:$port/healthcheck"
+                # Only a refused connection means "no child here"; a busy child that
+                # times out must not be re-warmed.
+                if [ $? -ne 7 ]; then
+                    [ -n "${warm[$port]}" ] && continue
+                    code=$(curl -s -o /dev/null -w '%{http_code}' -m 120 "${warm_hdr[@]}" \
+                        -H 'Content-Type: application/json' \
+                        --data-binary @"$WARMUP_BODY" "http://localhost:$port/io")
+                    echo "  Warm-up: child $port answered /io with $code"
+                    warm[$port]=1
+                else
+                    unset "warm[$port]"
+                fi
+            done
+            sleep 1
+        done
+    ) &
+else
+    echo "  WARNING: $WARMUP_GH not found — children start cold."
+fi
+
 exec dotnet run \
     --project rhino.compute \
     --configuration Release \

@@ -24,7 +24,11 @@
 #   CPUS          - CPU-time cap, e.g. CPUS=4 (docker --cpus). Fractions allowed.
 #   CPUSET        - Pin to specific cores instead, e.g. CPUSET=0-3 (--cpuset-cpus).
 #                   Use one or the other; CPUSET also controls WHICH cores.
-#   MEMORY        - RAM cap, e.g. MEMORY=8g (docker --memory).
+#   MEMORY        - RAM cap, e.g. MEMORY=8g (docker --memory). Also sets
+#                   --memory-swap to the same value, so the container cannot swap.
+#   CACHE_LIMIT_PERCENT - Memory load (% of MEMORY) at which each child evicts
+#                   its solve-result cache. Compute's own default is 70.
+#   RESTART       - Docker restart policy (default: unless-stopped).
 #
 # Rhino.Compute has no core limit of its own: --childcount only sets how many
 # compute.geometry workers run, and each worker is a headless Rhino that uses
@@ -45,7 +49,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Load setup/.env if present (RHINO_TOKEN=... etc). Env vars already set in
 # the shell win — .env only fills in what isn't already set.
 if [ -f "$SCRIPT_DIR/.env" ]; then
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY; do
+    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT RESTART; do
         eval "_prior_${var}=\"\${${var}-}\""
     done
 
@@ -54,7 +58,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
     set +a
 
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY; do
+    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT RESTART; do
         eval "if [ -n \"\${_prior_${var}-}\" ]; then ${var}=\"\${_prior_${var}}\"; fi"
     done
 fi
@@ -67,6 +71,7 @@ PORT="${PORT:-6500}"
 # older Rhino (and, at the time of writing, none of the Linux font fixes).
 PLATFORM="${PLATFORM:-linux/amd64}"
 CHILD_COUNT="${CHILD_COUNT:-1}"
+RESTART="${RESTART:-unless-stopped}"
 
 log() { echo ""; echo "==> $1"; }
 ok()  { echo "    ✓  $1"; }
@@ -130,7 +135,9 @@ echo "  Container  : $CONTAINER_NAME"
 echo "  Port       : $PORT -> 6500"
 echo "  Children   : $CHILD_COUNT"
 echo "  CPU limit  : $([ -n "$CPUSET" ] && echo "cores $CPUSET (pinned)" || { [ -n "$CPUS" ] && echo "$CPUS CPUs" || echo "none (all host cores)"; })"
-[ -n "$MEMORY" ] && echo "  Memory     : $MEMORY"
+[ -n "$MEMORY" ] && echo "  Memory     : $MEMORY (no swap)"
+[ -n "$CACHE_LIMIT_PERCENT" ] && echo "  Cache evict: at ${CACHE_LIMIT_PERCENT}% memory load"
+echo "  Restart    : $RESTART"
 echo "  Token      : $([ -n "$RHINO_TOKEN" ] && echo "set" || echo "NOT SET (computations will fail)")"
 echo "============================================================"
 echo ""
@@ -149,7 +156,10 @@ if [ -n "$CPUS" ] && [ -n "$CPUSET" ]; then
 fi
 [ -n "$CPUS" ]   && LIMIT_ARGS+=(--cpus "$CPUS")
 [ -n "$CPUSET" ] && LIMIT_ARGS+=(--cpuset-cpus "$CPUSET")
-[ -n "$MEMORY" ] && LIMIT_ARGS+=(--memory "$MEMORY")
+# --memory-swap equal to --memory means no swap. The solve-result cache evicts on
+# memory load, and swapped-out pages don't count as load, so with swap the cache
+# keeps growing and every solve ends up paging.
+[ -n "$MEMORY" ] && LIMIT_ARGS+=(--memory "$MEMORY" --memory-swap "$MEMORY")
 
 # Count the cores the cap actually allows, so we can sanity-check CHILD_COUNT.
 _allowed=""
@@ -172,6 +182,25 @@ if [ -n "$_allowed" ] && [ "$_allowed" -gt 0 ] 2>/dev/null && [ "$CHILD_COUNT" -
     echo "             may use. Each child is a full headless Rhino — running more"
     echo "             workers than cores mostly adds contention. Consider CHILD_COUNT=$_allowed."
     echo ""
+fi
+
+# Each child is a headless Rhino with its own definition and solve-result caches.
+if [ -z "$MEMORY" ]; then
+    echo "    WARNING: no MEMORY cap. The children's solve-result caches then evict"
+    echo "             against the whole host's RAM and ignore swap, so they can grow"
+    echo "             into swap and slow every solve. Set MEMORY (see setup/README.md)."
+    echo ""
+else
+    _mem_gb=""
+    case "$MEMORY" in
+        *[gG]) _mem_gb="${MEMORY%[gG]}" ;;
+        *[mM]) _mem_gb=$(( ${MEMORY%[mM]} / 1024 )) ;;
+    esac
+    if [ -n "$_mem_gb" ] && [ "$_mem_gb" -lt $((CHILD_COUNT * 2)) ] 2>/dev/null; then
+        echo "    WARNING: MEMORY=$MEMORY leaves under 2g per child for CHILD_COUNT=$CHILD_COUNT."
+        echo "             A child that hits the cap is killed mid-solve and respawned."
+        echo ""
+    fi
 fi
 
 # -------------------------------------------------------
@@ -266,10 +295,15 @@ fi
 # (leave unset for an unauthenticated local server)
 ENV_ARGS=()
 [ -n "$RHINO_COMPUTE_KEY" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_KEY=$RHINO_COMPUTE_KEY")
+[ -n "$CACHE_LIMIT_PERCENT" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_CACHE_PHYSICAL_LIMIT_PERCENT=$CACHE_LIMIT_PERCENT")
 
+# --init puts tini at PID 1 to reap orphaned processes and forward signals; without
+# it a zombie left behind by a crashed child can make `docker restart` fail.
 docker run -d \
     --platform "$PLATFORM" \
     --name "$CONTAINER_NAME" \
+    --init \
+    --restart "$RESTART" \
     -p "${PORT}:6500" \
     -e RHINO_TOKEN="$RHINO_TOKEN" \
     -e RHINO_COMPUTE_CHILD_COUNT="$CHILD_COUNT" \
@@ -293,6 +327,16 @@ HEALTH_HEADER=()
 
 ready=0
 for i in $(seq 1 90); do
+    # With a restart policy a crashing container is relaunched rather than exiting,
+    # so the restart count is the signal that it died.
+    if [ "$(docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME" 2>/dev/null || echo 0)" -gt 0 ]; then
+        echo ""
+        echo "ERROR: container '$CONTAINER_NAME' crashed during startup and is being restarted."
+        echo "Last log lines:"
+        docker logs --tail 30 "$CONTAINER_NAME" 2>&1 | sed 's/^/    /'
+        echo "Stop the restart loop with:  docker stop $CONTAINER_NAME"
+        exit 1
+    fi
     if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}\$"; then
         echo ""
         echo "ERROR: container '$CONTAINER_NAME' exited unexpectedly during startup."

@@ -100,6 +100,30 @@ case "$code" in
 esac
 
 # -------------------------------------------------------
+# Memory. A child whose cache has spilled into swap makes every solve slow
+# while the healthcheck stays green.
+# -------------------------------------------------------
+log "Memory"
+mem_limit="$(docker inspect -f '{{.HostConfig.Memory}}' "$CONTAINER_NAME")"
+mem_swap="$(docker inspect -f '{{.HostConfig.MemorySwap}}' "$CONTAINER_NAME")"
+if [ "$mem_limit" = "0" ]; then
+    bad "No memory cap — the solve-result caches can grow into swap (set MEMORY, see setup/README.md)"
+elif [ "$mem_swap" = "$mem_limit" ]; then
+    ok "Memory cap $((mem_limit / 1024 / 1024))m, no swap"
+else
+    bad "Memory cap $((mem_limit / 1024 / 1024))m, but swap is allowed — recreate with ./docker-launch.sh"
+fi
+restarts="$(docker inspect -f '{{.RestartCount}}' "$CONTAINER_NAME")"
+[ "$restarts" -gt 0 ] && bad "Restarted $restarts time(s) since it was created — check docker logs"
+docker exec "$CONTAINER_NAME" sh -c '
+    for pid in $(pgrep -f "[c]ompute\.geometry -port:"); do
+        port=$(tr "\0" " " < /proc/$pid/cmdline | grep -o -- "-port:[0-9]*" | head -1 | cut -d: -f2)
+        rss=$(awk "/^VmRSS/ {print int(\$2 / 1024)}" /proc/$pid/status)
+        swap=$(awk "/^VmSwap/ {print int(\$2 / 1024)}" /proc/$pid/status)
+        echo "    child $port: ${rss}m RAM, ${swap}m swap"
+    done' 2>/dev/null || bad "Could not read the children's memory"
+
+# -------------------------------------------------------
 # Loaded Grasshopper plugins — the other thing that fails silently.
 # -------------------------------------------------------
 if [ "$code" = "200" ]; then

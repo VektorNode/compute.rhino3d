@@ -41,7 +41,7 @@ docker start rhino-compute-x9
 
 | You changed                                   | Run                                  |
 | --------------------------------------------- | ------------------------------------ |
-| `.env` (`CPUS`, `CHILD_COUNT`, `PORT`, token…) | `NO_BUILD=1 ./docker-launch.sh`      |
+| `.env` (`CPUS`, `MEMORY`, `CHILD_COUNT`, `PORT`, token…) | `NO_BUILD=1 ./docker-launch.sh` |
 | `packages.json` (yak versions)                 | `NO_BUILD=1 ./docker-launch.sh`      |
 | Rebuilt a live-mounted plugin                  | `docker restart rhino-compute-x9`    |
 | `start.sh` / `Dockerfile`                      | `./docker-launch.sh`                 |
@@ -104,7 +104,9 @@ layer and you get the old code. Expect several minutes (full apt install,
 | `NO_BUILD=1`        | Skip image build, just recreate the container         |
 | `FRESH=1`           | No-cache rebuild — use after pushing source changes   |
 | `CPUS` / `CPUSET`   | Cap CPU time (`4`) or pin cores (`0-3`) — see [README](../setup/README.md#limiting-cpu-and-memory) |
-| `MEMORY`            | RAM cap (`8g`)                                        |
+| `MEMORY`            | RAM cap (`8g`), swap off — always set it, see [README](../setup/README.md#always-set-memory) |
+| `CACHE_LIMIT_PERCENT` | Memory load (% of `MEMORY`) at which cached solve results are evicted (default `70`) |
+| `RESTART`           | Docker restart policy (default `unless-stopped`)      |
 | `PLATFORM`          | Docker platform (default `linux/amd64`, also on Apple Silicon — arm64 Rhino packages lag months behind) |
 
 ## Everything runs locally

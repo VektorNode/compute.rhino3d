@@ -24,7 +24,11 @@
 #   PLATFORM          - Docker platform (default: linux/amd64)
 #   CPUS              - CPU-time cap, e.g. CPUS=4 (docker --cpus). Fractions allowed.
 #   CPUSET            - Pin to specific cores instead, e.g. CPUSET=0-3 (--cpuset-cpus)
-#   MEMORY            - RAM cap, e.g. MEMORY=8g (docker --memory)
+#   MEMORY            - RAM cap, e.g. MEMORY=8g (docker --memory). Also sets
+#                       --memory-swap to the same value, so the container cannot swap.
+#   CACHE_LIMIT_PERCENT - Memory load (% of MEMORY) at which each child evicts
+#                       its solve-result cache. Compute's own default is 70.
+#   RESTART           - Docker restart policy (default: unless-stopped)
 #
 # Rhino.Compute has no core limit of its own: --childcount only sets how many
 # compute.geometry workers run, and each worker is a headless Rhino that uses
@@ -51,7 +55,7 @@ function Fail([string]$m) { Write-Host ""; Write-Host "ERROR: $m" -ForegroundCol
 # -------------------------------------------------------
 $Vars = @('RHINO_TOKEN','RHINO_COMPUTE_KEY','IMAGE_NAME','CONTAINER_NAME','PORT',
           'CHILD_COUNT','REPO_URL','BRANCH','NO_BUILD','FRESH','LOCAL_PLUGINS','PLATFORM',
-          'CPUS','CPUSET','MEMORY')
+          'CPUS','CPUSET','MEMORY','CACHE_LIMIT_PERCENT','RESTART')
 
 $EnvFile = Join-Path $ScriptDir '.env'
 if (Test-Path $EnvFile) {
@@ -84,6 +88,8 @@ $ComputeKey    = EnvOr 'RHINO_COMPUTE_KEY' ''
 $Cpus          = EnvOr 'CPUS'           ''
 $CpuSet        = EnvOr 'CPUSET'         ''
 $MemoryLimit   = EnvOr 'MEMORY'         ''
+$CacheLimit    = EnvOr 'CACHE_LIMIT_PERCENT' ''
+$Restart       = EnvOr 'RESTART'        'unless-stopped'
 
 Write-Host ""
 Write-Host "============================================================"
@@ -97,7 +103,9 @@ Write-Host "  Children   : $ChildCount"
 if     ($CpuSet) { Write-Host "  CPU limit  : cores $CpuSet (pinned)" }
 elseif ($Cpus)   { Write-Host "  CPU limit  : $Cpus CPUs" }
 else             { Write-Host "  CPU limit  : none (all host cores)" }
-if ($MemoryLimit) { Write-Host "  Memory     : $MemoryLimit" }
+if ($MemoryLimit) { Write-Host "  Memory     : $MemoryLimit (no swap)" }
+if ($CacheLimit)  { Write-Host "  Cache evict: at $CacheLimit% memory load" }
+Write-Host "  Restart    : $Restart"
 Write-Host "  Platform   : $Platform"
 Write-Host "============================================================"
 
@@ -114,7 +122,10 @@ if ($Cpus -and $CpuSet) {
 }
 if ($Cpus)        { $limitArgs += @('--cpus', $Cpus) }
 if ($CpuSet)      { $limitArgs += @('--cpuset-cpus', $CpuSet) }
-if ($MemoryLimit) { $limitArgs += @('--memory', $MemoryLimit) }
+# --memory-swap equal to --memory means no swap. The solve-result cache evicts on
+# memory load, and swapped-out pages don't count as load, so with swap the cache
+# keeps growing and every solve ends up paging.
+if ($MemoryLimit) { $limitArgs += @('--memory', $MemoryLimit, '--memory-swap', $MemoryLimit) }
 
 # How many cores the cap actually allows, to sanity-check CHILD_COUNT.
 $allowed = 0
@@ -132,6 +143,21 @@ if ($allowed -gt 0 -and [int]$ChildCount -gt $allowed) {
     Warn "CHILD_COUNT=$ChildCount exceeds the $allowed core(s) this container may use."
     Write-Host "             Each child is a full headless Rhino — more workers than cores"
     Write-Host "             mostly adds contention. Consider CHILD_COUNT=$allowed."
+}
+
+# Each child is a headless Rhino with its own definition and solve-result caches.
+if (-not $MemoryLimit) {
+    Warn "no MEMORY cap. The children's solve-result caches then evict against the"
+    Write-Host "             whole host's RAM and ignore swap, so they can grow into swap and"
+    Write-Host "             slow every solve. Set MEMORY (see setup\README.md)."
+} else {
+    $memGb = $null
+    if ($MemoryLimit -match '^(\d+)[gG]$') { $memGb = [int]$Matches[1] }
+    elseif ($MemoryLimit -match '^(\d+)[mM]$') { $memGb = [int][math]::Floor([int]$Matches[1] / 1024) }
+    if ($null -ne $memGb -and $memGb -lt ([int]$ChildCount * 2)) {
+        Warn "MEMORY=$MemoryLimit leaves under 2g per child for CHILD_COUNT=$ChildCount."
+        Write-Host "             A child that hits the cap is killed mid-solve and respawned."
+    }
 }
 
 # -------------------------------------------------------
@@ -252,11 +278,15 @@ if ($localPlugins) {
 # Run
 # -------------------------------------------------------
 Log "Starting container '$ContainerName'"
+# --init puts tini at PID 1 to reap orphaned processes and forward signals; without
+# it a zombie left behind by a crashed child can make `docker restart` fail.
 $runArgs = @('run', '-d', '--platform', $Platform, '--name', $ContainerName,
+             '--init', '--restart', $Restart,
              '-p', "${Port}:6500",
              '-e', "RHINO_TOKEN=$Token",
              '-e', "RHINO_COMPUTE_CHILD_COUNT=$ChildCount")
 if ($ComputeKey) { $runArgs += @('-e', "RHINO_COMPUTE_KEY=$ComputeKey") }
+if ($CacheLimit) { $runArgs += @('-e', "RHINO_COMPUTE_CACHE_PHYSICAL_LIMIT_PERCENT=$CacheLimit") }
 $runArgs += $limitArgs
 $runArgs += $mounts
 $runArgs += $ImageName
@@ -277,6 +307,17 @@ if ($ComputeKey) { $headers['RhinoComputeKey'] = $ComputeKey }
 $ready = $false
 $elapsed = 0
 for ($i = 1; $i -le 90; $i++) {
+    # With a restart policy a crashing container is relaunched rather than exiting,
+    # so the restart count is the signal that it died.
+    $restarts = [int](docker inspect -f '{{.RestartCount}}' $ContainerName 2>$null)
+    if ($restarts -gt 0) {
+        Write-Host ""
+        Write-Host "ERROR: container '$ContainerName' crashed during startup and is being restarted." -ForegroundColor Red
+        Write-Host "Last log lines:"
+        docker logs --tail 30 $ContainerName 2>&1 | ForEach-Object { "    $_" }
+        Write-Host "Stop the restart loop with:  docker stop $ContainerName"
+        exit 1
+    }
     $running = docker ps --format '{{.Names}}' | Where-Object { $_ -eq $ContainerName }
     if (-not $running) {
         Write-Host ""

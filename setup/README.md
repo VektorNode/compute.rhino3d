@@ -78,7 +78,7 @@ CPUSET=0-3 CHILD_COUNT=4 ./docker-launch.sh          # or pin specific cores
 | -------- | ----------------- | ---------------------------------------- |
 | `CPUS`   | `--cpus`          | CPU-time cap; fractions allowed (`2.5`)  |
 | `CPUSET` | `--cpuset-cpus`   | Pin to specific cores (`0-3`, `0,2,4`)   |
-| `MEMORY` | `--memory`        | RAM cap (`8g`)                           |
+| `MEMORY` | `--memory`, `--memory-swap` | RAM cap (`8g`), swap off       |
 
 Set one of `CPUS` or `CPUSET`, not both — the launcher warns and prefers
 `CPUSET`. Keep `CHILD_COUNT` at or below the allowed core count; the launcher
@@ -99,9 +99,71 @@ docker exec <container> cat /sys/fs/cgroup/cpu.max   # "400000 100000" = 4 cores
 On Windows, Docker Desktop's own VM has a global CPU/memory ceiling
 (Settings → Resources) that applies on top of these per-container limits.
 
+### Always set `MEMORY`
+
+Every child keeps the results of its recent solves in a cache that evicts
+on **memory load**: the share of RAM in use, at `CACHE_LIMIT_PERCENT`
+(compute's default 70). With `MEMORY` set, the load is measured against
+that cap. Without it, the cache measures against the whole host's RAM, and
+swapped-out pages don't count as load. So the children keep growing into
+swap and every solve has to page them back in. Health checks stay green
+while solves that took a second start taking a minute.
+
+The launcher therefore passes `MEMORY` as both `--memory` and
+`--memory-swap`, so the container can't swap at all, and it warns when
+`MEMORY` is unset or leaves less than 2g per child. A child that hits the
+cap is killed and respawned by the parent, which costs that one solve.
+`./docker-status.sh` shows each child's RAM and swap.
+
 Outside Docker, the same capping is done with IIS app-pool processor affinity
 (Windows) or `AllowedCPUs`/`CPUQuota` in a systemd drop-in (Linux) — the
 children inherit the parent's limit in both cases.
+
+## Running on a dedicated server
+
+On an x86-64 host the `linux/amd64` image runs natively. On Apple Silicon
+it runs under emulation, where the same Grasshopper solve takes several
+times longer than in Rhino on that Mac. A server that others solve
+against should be x86-64.
+
+**Children are concurrent solves, not cores.** A Grasshopper solve mostly
+runs on one core (components run one after another, and most plugin
+components are single-threaded), so a second child only helps when a
+second solve arrives at the same time: another user, or a batch run.
+Each child also keeps its own copy of every definition it has solved, so
+each extra child adds one more cold first solve per definition. Set
+`CHILD_COUNT` to the number of solves you expect at once. For a single
+solve, single-core speed matters more than core count.
+
+**Leave `CPUS`/`CPUSET` unset** on a machine that runs nothing else, so
+Rhino's own multithreaded operations (meshing, booleans) can use idle
+cores.
+
+**Set `MEMORY` to about 2g per child plus 2g**, then check the real
+numbers with `./docker-status.sh` after a day of use and adjust. Lower
+`CACHE_LIMIT_PERCENT` (e.g. `60`) if children get killed at the cap.
+
+```bash
+# setup/.env on the server
+RHINO_TOKEN=...
+RHINO_COMPUTE_KEY=...          # the server is on the network: require the key
+CHILD_COUNT=6
+MEMORY=14g
+CACHE_LIMIT_PERCENT=60
+```
+
+The container starts with `--restart unless-stopped` (override with
+`RESTART`), so it comes back after a reboot or a crash, and with `--init`,
+so a crashed child can't leave a zombie that blocks `docker restart`.
+
+**Plugins.** `LOCAL_PLUGINS` paths are folders on the machine that runs
+Docker. On a server, copy each plugin's build output there (e.g. `rsync`)
+and point `LOCAL_PLUGINS` at the copies, or put them in `setup/plugins/`.
+The [one source per plugin](#one-source-per-plugin) rule applies there too.
+
+**Network.** Open port 6500 only to the hosts that run your app, and set
+`RHINO_COMPUTE_KEY` on both sides. Then point the app's Compute URL at
+`http://<server>:6500`.
 
 ## Checking Status
 
@@ -115,7 +177,8 @@ cd setup
 ```
 
 It reports: whether the daemon is up, whether the container is running,
-whether `/healthcheck` actually responds, which Grasshopper plugins loaded
+whether `/healthcheck` actually responds, the memory cap and each child's
+RAM and swap, which Grasshopper plugins loaded
 (the other thing that can silently fail — see
 [docs/grasshopper-plugins-not-loading-linux.md](../docs/grasshopper-plugins-not-loading-linux.md)),
 and the last few log lines either way.

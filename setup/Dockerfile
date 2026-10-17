@@ -73,10 +73,13 @@ RUN mkdir -p /root/.nuget/NuGet \
 # ============================================================
 ARG REPO_URL=https://github.com/VektorNode/compute.rhino3d.git
 ARG BRANCH=9.x.selva
+# The branch head, resolved by the launchers: a new commit changes it, so this clone layer and the
+# build below rerun while the apt/.NET/Rhino layers above stay cached. Empty checks out BRANCH.
+ARG COMPUTE_REF=
 
 RUN git clone ${REPO_URL} /home/rhino-compute-src \
     && cd /home/rhino-compute-src \
-    && git checkout ${BRANCH}
+    && git checkout ${COMPUTE_REF:-$BRANCH}
 
 # ============================================================
 # 6. Build

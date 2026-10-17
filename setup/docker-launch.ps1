@@ -19,7 +19,7 @@
 #   REPO_URL          - Repo to clone inside the image (default: Dockerfile ARG)
 #   BRANCH            - Branch to check out inside the image (default: Dockerfile ARG)
 #   NO_BUILD          - Skip the image build step if "1" (reuse existing image)
-#   FRESH             - No-cache rebuild if "1" (use after pushing source changes)
+#   FRESH             - No-cache rebuild of every layer if "1" (e.g. a new rhino3d package)
 #   LOCAL_PLUGINS     - Comma-separated host folders to mount as live plugins
 #   PLATFORM          - Docker platform (default: linux/amd64)
 #   CPUS              - CPU-time cap, e.g. CPUS=4 (docker --cpus). Fractions allowed.
@@ -204,8 +204,19 @@ if ((EnvOr 'NO_BUILD' '') -eq '1') {
     $buildArgs = @('build', '--platform', $Platform, '-t', $ImageName)
     if (EnvOr 'REPO_URL' '') { $buildArgs += @('--build-arg', "REPO_URL=$(EnvOr 'REPO_URL' '')") }
     if (EnvOr 'BRANCH'   '') { $buildArgs += @('--build-arg', "BRANCH=$(EnvOr 'BRANCH' '')") }
-    # FRESH=1 busts the layer cache — needed to pick up new commits, since the
-    # git clone happens inside a cached build layer.
+    # Pin the clone to the branch head so a pushed commit rebuilds it; the cached
+    # clone layer would otherwise keep the old checkout forever.
+    $dockerfile = Get-Content (Join-Path $ScriptDir 'Dockerfile')
+    $refRepo   = EnvOr 'REPO_URL' (($dockerfile | Select-String '^ARG REPO_URL=(.*)').Matches[0].Groups[1].Value)
+    $refBranch = EnvOr 'BRANCH'   (($dockerfile | Select-String '^ARG BRANCH=(.*)').Matches[0].Groups[1].Value)
+    $computeRef = ((git ls-remote $refRepo "refs/heads/$refBranch" 2>$null) -split "`t")[0]
+    if ($computeRef) {
+        $buildArgs += @('--build-arg', "COMPUTE_REF=$computeRef")
+        Ok "Building $refBranch at $($computeRef.Substring(0, 7))"
+    } else {
+        Warn "could not resolve $refBranch on $refRepo; a cached clone may be stale (FRESH=1 forces it)."
+    }
+    # FRESH=1 rebuilds every layer, e.g. to pick up a new rhino3d package.
     if ((EnvOr 'FRESH' '') -eq '1') { $buildArgs += '--no-cache' }
     $buildArgs += $ScriptDir
 

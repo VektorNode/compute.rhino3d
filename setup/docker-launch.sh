@@ -214,8 +214,18 @@ else
     BUILD_ARGS=()
     [ -n "$REPO_URL" ] && BUILD_ARGS+=(--build-arg "REPO_URL=$REPO_URL")
     [ -n "$BRANCH" ] && BUILD_ARGS+=(--build-arg "BRANCH=$BRANCH")
-    # FRESH=1 busts the docker layer cache — needed to pick up new commits,
-    # since the git clone happens in a cached build layer
+    # Pin the clone to the branch head so a pushed commit rebuilds it; the cached
+    # clone layer would otherwise keep the old checkout forever.
+    ref_repo="${REPO_URL:-$(sed -n 's/^ARG REPO_URL=//p' "$SCRIPT_DIR/Dockerfile")}"
+    ref_branch="${BRANCH:-$(sed -n 's/^ARG BRANCH=//p' "$SCRIPT_DIR/Dockerfile")}"
+    COMPUTE_REF="$(git ls-remote "$ref_repo" "refs/heads/$ref_branch" 2>/dev/null | cut -f1)"
+    if [ -n "$COMPUTE_REF" ]; then
+        BUILD_ARGS+=(--build-arg "COMPUTE_REF=$COMPUTE_REF")
+        ok "Building $ref_branch at ${COMPUTE_REF:0:7}"
+    else
+        echo "    WARNING: could not resolve $ref_branch on $ref_repo; a cached clone may be stale (FRESH=1 forces it)."
+    fi
+    # FRESH=1 rebuilds every layer, e.g. to pick up a new rhino3d package.
     [ "$FRESH" = "1" ] && BUILD_ARGS+=(--no-cache)
 
     docker build --platform "$PLATFORM" -t "$IMAGE_NAME" "${BUILD_ARGS[@]}" "$SCRIPT_DIR"

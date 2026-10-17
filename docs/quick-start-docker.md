@@ -45,7 +45,8 @@ docker start rhino-compute-x9
 | `packages.json` (yak versions)                 | `NO_BUILD=1 ./docker-launch.sh`      |
 | Rebuilt a live-mounted plugin                  | `docker restart rhino-compute-x9`    |
 | `start.sh` / `Dockerfile`                      | `./docker-launch.sh`                 |
-| Pushed compute source changes                  | `FRESH=1 ./docker-launch.sh`         |
+| Pushed compute source changes                  | `./docker-launch.sh`                 |
+| A new `rhino3d` package (`RHINO3D_VERSION`)    | `FRESH=1 ./docker-launch.sh`         |
 
 `docker restart` re-runs `start.sh`, so it re-stages plugins and re-reads
 `packages.json` — but it does **not** pick up `.env`. Those values become
@@ -85,12 +86,13 @@ pushed:
 git add -A && git commit -m "..."
 git push
 cd setup
-FRESH=1 ./docker-launch.sh   # no-cache rebuild, pulls the new commit
+./docker-launch.sh           # rebuilds from the clone step at the pushed commit
 ```
 
-`FRESH=1` is required — without it, Docker reuses the cached `git clone`
-layer and you get the old code. Expect several minutes (full apt install,
-.NET SDK, Rhino libs, clone, compile).
+The launcher resolves the branch head with `git ls-remote` and passes it as
+`COMPUTE_REF`, so the clone and compile rerun while the apt, .NET and Rhino
+layers stay cached. It prints the commit it builds; if it cannot resolve the
+branch it warns, and `FRESH=1` forces a full no-cache rebuild.
 
 ## Common env vars (set in `setup/.env` or inline)
 
@@ -102,7 +104,7 @@ layer and you get the old code. Expect several minutes (full apt install,
 | `CHILD_COUNT`       | Number of compute.geometry children (default `1`)     |
 | `LOCAL_PLUGINS`     | Comma-separated host folders to live-mount as plugins |
 | `NO_BUILD=1`        | Skip image build, just recreate the container         |
-| `FRESH=1`           | No-cache rebuild — use after pushing source changes   |
+| `FRESH=1`           | No-cache rebuild of every layer (e.g. a new `rhino3d`) |
 | `CPUS` / `CPUSET`   | Cap CPU time (`4`) or pin cores (`0-3`) — see [README](../setup/README.md#limiting-cpu-and-memory) |
 | `MEMORY`            | RAM cap (`8g`), swap off — always set it, see [README](../setup/README.md#always-set-memory) |
 | `CACHE_LIMIT_PERCENT` | Memory load (% of `MEMORY`) at which cached solve results are evicted (default `70`) |

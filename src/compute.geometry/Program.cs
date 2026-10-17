@@ -107,6 +107,9 @@ namespace compute.geometry
                     if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Port > 0)
                     {
                         DynamicPortEnricher.SetPort(uri.Port);
+                        // Running on its own, this process is the server its definitions call back into.
+                        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RHINO_COMPUTE_PARENT_URL")))
+                            Environment.SetEnvironmentVariable("RHINO_COMPUTE_PARENT_URL", $"{uri.Scheme}://localhost:{uri.Port}");
                         break;
                     }
                 }
@@ -119,7 +122,17 @@ namespace compute.geometry
                 RhinoCore.Dispose();
 
             Log.CloseAndFlush();
+
+            // Skip native DLL teardown, where RhinoCore calls into managed code after .NET has shut down (RH-98958).
+            if (OperatingSystem.IsWindows())
+                TerminateProcess(GetCurrentProcess(), 0);
         }
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern IntPtr GetCurrentProcess();
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern bool TerminateProcess(IntPtr hProcess, uint exitCode);
 
         static void ParseCommandLineArgs(string[] args)
         {
@@ -164,13 +177,14 @@ namespace compute.geometry
                         break;
                     case "load-grasshopper":
                         {
-                            // Set environment variable so Config.Load() picks it up
-                            Environment.SetEnvironmentVariable("RHINO_COMPUTE_LOAD_GRASSHOPPER", value);
-                            Log.Information($"Grasshopper loading set to: {value}");
+                            Config.LoadGrasshopper = value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase);
+                            Log.Information($"Grasshopper loading set to: {Config.LoadGrasshopper}");
                         }
                         break;
                     case "apikey":
                         {
+                            Config.ApiKey = value;
+                            // Hops components in definitions being solved send this key with their requests.
                             Environment.SetEnvironmentVariable("RHINO_COMPUTE_KEY", value);
                             Log.Information("API key set from command line");
                         }

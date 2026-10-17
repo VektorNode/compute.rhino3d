@@ -1,8 +1,10 @@
 ﻿using System;
 using System.IO;
+using System.Threading;
 using System.Net;
 using System.Collections.Generic;
 using System.Drawing;
+
 using Rhino.Geometry;
 
 using Grasshopper.Kernel;
@@ -16,14 +18,17 @@ using Resthopper.IO;
 using Newtonsoft.Json;
 using System.Linq;
 using Serilog;
+using Serilog.Events;
 using System.Reflection;
 
 namespace compute.geometry
 {
     class GrasshopperDefinition
     {
-        static Dictionary<string, FileSystemWatcher> filewatchers;
-        static HashSet<string> watchedFiles = new HashSet<string>();
+        static readonly Dictionary<string, FileSystemWatcher> filewatchers = new Dictionary<string, FileSystemWatcher>();
+        static readonly HashSet<string> watchedFiles = new HashSet<string>();
+        // Requests register files concurrently, and each watcher reads the set from its own thread.
+        static readonly object watcherLock = new object();
         static uint watchedFileRuntimeSerialNumber = 1;
         public static uint WatchedFileRuntimeSerialNumber
         {
@@ -31,40 +36,41 @@ namespace compute.geometry
         }
         static void RegisterFileWatcher(string path)
         {
-            if (filewatchers == null)
-            {
-                filewatchers = new Dictionary<string, FileSystemWatcher>();
-            }
             if (!File.Exists(path))
                 return;
 
             path = Path.GetFullPath(path);
-            if (watchedFiles.Contains(path.ToLowerInvariant()))
-                return;
+            lock (watcherLock)
+            {
+                if (!watchedFiles.Add(path.ToLowerInvariant()))
+                    return;
 
-            watchedFiles.Add(path.ToLowerInvariant());
-            string directory = Path.GetDirectoryName(path);
-            if (filewatchers.ContainsKey(directory) || !Directory.Exists(directory))
-                return;
+                string directory = Path.GetDirectoryName(path);
+                if (filewatchers.ContainsKey(directory) || !Directory.Exists(directory))
+                    return;
 
-            var fsw = new FileSystemWatcher(directory);
-            fsw.NotifyFilter = NotifyFilters.Attributes |
-                NotifyFilters.CreationTime |
-                NotifyFilters.FileName |
-                NotifyFilters.LastAccess |
-                NotifyFilters.LastWrite |
-                NotifyFilters.Size |
-                NotifyFilters.Security;
-            fsw.Changed += Fsw_Changed;
-            fsw.EnableRaisingEvents = true;
-            filewatchers[directory] = fsw;
+                var fsw = new FileSystemWatcher(directory);
+                fsw.NotifyFilter = NotifyFilters.Attributes |
+                    NotifyFilters.CreationTime |
+                    NotifyFilters.FileName |
+                    NotifyFilters.LastAccess |
+                    NotifyFilters.LastWrite |
+                    NotifyFilters.Size |
+                    NotifyFilters.Security;
+                fsw.Changed += Fsw_Changed;
+                fsw.EnableRaisingEvents = true;
+                filewatchers[directory] = fsw;
+            }
         }
 
         private static void Fsw_Changed(object sender, FileSystemEventArgs e)
         {
             string path = e.FullPath.ToLowerInvariant();
-            if (watchedFiles.Contains(path))
-                watchedFileRuntimeSerialNumber++;
+            lock (watcherLock)
+            {
+                if (watchedFiles.Contains(path))
+                    watchedFileRuntimeSerialNumber++;
+            }
         }
 
         public static void LogDebug(string message) { Log.Debug(message); }
@@ -88,11 +94,12 @@ namespace compute.geometry
             }
             else
             {
-                var archive = ArchiveFromUrl(url);
+                var archive = ArchiveFromUrl(url, out byte[] contents);
                 if (archive == null)
                     return null;
 
                 rc = Construct(archive);
+                rc.sourceBytes = contents;
                 rc.CacheKey = url;
                 rc.IsLocalFileDefinition = !UrlGuard.IsWebUrl(url) && File.Exists(url);
             }
@@ -106,14 +113,27 @@ namespace compute.geometry
 
         public static GrasshopperDefinition FromBase64String(string data, bool cache)
         {
-            var archive = ArchiveFromBase64String(data);
+            string cacheKey = string.IsNullOrWhiteSpace(data) ? null : DataCache.CreateCacheKey(data);
+            if (cache)
+            {
+                // Clients that send the definition with every request would otherwise build, and leak, one per request.
+                var loaded = DataCache.GetLoadedDefinition(cacheKey);
+                if (loaded != null)
+                {
+                    LogDebug("Using cached definition");
+                    return loaded;
+                }
+            }
+
+            var archive = ArchiveFromBase64String(data, out byte[] contents);
             if (archive == null)
                 return null;
 
             var rc = Construct(archive);
             if (rc != null)
             {
-                rc.CacheKey = DataCache.CreateCacheKey(data);
+                rc.sourceBytes = contents;
+                rc.CacheKey = cacheKey;
                 if (cache)
                 {
                     DataCache.SetCachedDefinition(rc.CacheKey, rc, data);
@@ -122,6 +142,11 @@ namespace compute.geometry
             }
             return rc;
         }
+
+        // Grasshopper's document server isn't safe from two threads, and nested Hops calls load definitions alongside
+        // other solves. Only its calls are locked: reading a definition can make Hops fetch its remote definition, and
+        // that request may need this lock in the same or another process.
+        static readonly object documentServerLock = new object();
 
         private static GrasshopperDefinition Construct(Guid componentId)
         {
@@ -135,7 +160,8 @@ namespace compute.geometry
             try
             {
                 // raise DocumentServer.DocumentAdded event (used by some plug-ins)
-                Grasshopper.Instances.DocumentServer.AddDocument(definition);
+                lock (documentServerLock)
+                    Grasshopper.Instances.DocumentServer.AddDocument(definition);
             }
             catch (Exception e)
             {
@@ -143,6 +169,7 @@ namespace compute.geometry
             }
 
             GrasshopperDefinition rc = new GrasshopperDefinition(definition, null);
+            rc.sourceComponentId = componentId;
             rc.singularComponent = component;
             foreach (var input in component.Params.Input)
             {
@@ -151,6 +178,7 @@ namespace compute.geometry
             foreach (var output in component.Params.Output)
             {
                 rc.output[output.NickName] = output;
+                rc.outputTypeNames[output.NickName] = output.TypeName;
             }
             return rc;
         }
@@ -176,7 +204,10 @@ namespace compute.geometry
                 LogError(msg);
             }
             else
+            {
                 rc.output[name] = param;
+                rc.outputTypeNames[name] = param.TypeName;
+            }
         }
 
         private static GrasshopperDefinition Construct(GH_Archive archive)
@@ -203,7 +234,8 @@ namespace compute.geometry
             try
             {
                 // raise DocumentServer.DocumentAdded event (used by some plug-ins)
-                Grasshopper.Instances.DocumentServer.AddDocument(definition);
+                lock (documentServerLock)
+                    Grasshopper.Instances.DocumentServer.AddDocument(definition);
             }
             catch (Exception e)
             {
@@ -295,6 +327,67 @@ namespace compute.geometry
             FileRuntimeCacheSerialNumber = watchedFileRuntimeSerialNumber;
         }
 
+        // A cached definition is shared by every request for it, but a solve sets its inputs and reads its outputs, so
+        // two solves at once (nested Hops calls solve alongside other solves) would overwrite each other's. The first
+        // solve takes this instance; any other solves a copy built from the same source, released afterwards.
+        public GrasshopperDefinition CheckOut()
+        {
+            if (Interlocked.CompareExchange(ref checkedOut, 1, 0) == 0)
+                return this;
+            GrasshopperDefinition copy = null;
+            if (sourceBytes != null)
+            {
+                var archive = ArchiveFromBytes(sourceBytes);
+                if (archive != null)
+                    copy = Construct(archive);
+            }
+            else if (sourceComponentId != Guid.Empty)
+            {
+                copy = Construct(sourceComponentId);
+            }
+            if (copy == null)
+                throw new Exception("Unable to load another copy of the grasshopper definition");
+            copy.CacheKey = CacheKey;
+            copy.IsLocalFileDefinition = IsLocalFileDefinition;
+            copy.isCopy = true;
+            return copy;
+        }
+
+        public void CheckIn()
+        {
+            if (!isCopy)
+            {
+                Interlocked.Exchange(ref checkedOut, 0);
+                if (retired && Interlocked.CompareExchange(ref checkedOut, 2, 0) == 0)
+                    Release();
+                return;
+            }
+            Release();
+        }
+
+        // The definition cache dropped this instance: released now, or by the solve using it when it checks it in.
+        public void Retire()
+        {
+            retired = true;
+            if (Interlocked.CompareExchange(ref checkedOut, 2, 0) == 0)
+                Release();
+        }
+
+        void Release()
+        {
+            lock (documentServerLock)
+                Grasshopper.Instances.DocumentServer.RemoveDocument(Definition);
+            Definition.Dispose();
+        }
+
+        // The file's bytes rather than the parsed archive, which takes several times the memory.
+        byte[] sourceBytes;
+        Guid sourceComponentId;
+        // 0 free, 1 a solve is using it, 2 released.
+        int checkedOut;
+        volatile bool retired;
+        bool isCopy;
+
         public GH_Document Definition { get; }
         public bool InDataCache { get; set; }
         public bool HasErrors { get; private set; } // default: false
@@ -305,6 +398,8 @@ namespace compute.geometry
         GH_Component singularComponent;
         Dictionary<string, InputGroup> input = new Dictionary<string, InputGroup>();
         Dictionary<string, IGH_Param> output = new Dictionary<string, IGH_Param>();
+        // Read at load: TypeName enumerates a parameter's data, which another request's solve may be changing.
+        Dictionary<string, string> outputTypeNames = new Dictionary<string, string>();
         public List<string> ErrorMessages = new List<string>();
 
         public GH_Path GetPath(string p)
@@ -354,107 +449,16 @@ namespace compute.geometry
                     }
 
                     updatedInputs.Add(tree.ParamName);
-                    inputGroup.CacheTree(tree);
-
-                    IGH_ContextualParameter contextualParameter = inputGroup.Param as IGH_ContextualParameter;
-                    if (contextualParameter != null)
+                    try
                     {
-                        if (contextualParameter.AtLeast == 0)
-                            (contextualParameter as IGH_Param).Optional = true;
-
-                        switch (ParamTypeName(inputGroup.Param))
-                        {
-                            case "Boolean":
-                                BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Boolean(JsonConvert.DeserializeObject<bool>(r.Data)));
-                                break;
-                            case "Number":
-                                BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Number(JsonConvert.DeserializeObject<double>(r.Data)));
-                                break;
-                            case "Integer":
-                                BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Integer(JsonConvert.DeserializeObject<int>(r.Data)));
-                                break;
-                            case "Point":
-                                BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Point(JsonConvert.DeserializeObject<Point3d>(r.Data)));
-                                break;
-                            case "Plane":
-                                BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Plane(JsonConvert.DeserializeObject<Plane>(r.Data)));
-                                break;
-                            case "Line":
-                                BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Line(JsonConvert.DeserializeObject<Line>(r.Data)));
-                                break;
-                            case "Text":
-                                BuildAndAssignContextualTree(contextualParameter, tree, DeserializeText);
-                                break;
-                            case "Geometry":
-                                BuildAndAssignContextualTree(contextualParameter, tree, DeserializeGeometry);
-                                break;
-                            ////////////////////////////////////////////////
-                            /// VEKTORNODE: IO-HANDLERS — Selva Specific Contextual Inputs
-                            /// (Color / File / ValueList — none of these exist upstream).
-                            ////////////////////////////////////////////////
-                            // Color and File arrive as (possibly escaped) JSON strings; DeserializeText
-                            // already does the JsonConvert-with-Regex.Unescape fallback these need.
-                            case "Color":
-                                BuildAndAssignContextualTree(contextualParameter, tree, DeserializeText);
-                                break;
-                            case "File":
-                                BuildAndAssignContextualTree(contextualParameter, tree, DeserializeText);
-                                break;
-                            // ValueList assigns via SetValues (a flat string list), not a contextual
-                            // data tree, so it can't use BuildAndAssignContextualTree.
-                            case "ValueList":
-                                {
-                                    var stringList = new List<string>();
-                                    foreach (KeyValuePair<string, List<ResthopperObject>> entree in tree)
-                                    {
-                                        for (int i = 0; i < entree.Value.Count; i++)
-                                        {
-                                            ResthopperObject restobj = entree.Value[i];
-                                            string data;
-                                            try
-                                            { data = JsonConvert.DeserializeObject<string>(restobj.Data) ?? restobj.Data.Trim('"'); }
-                                            catch { data = restobj.Data.Trim('"'); }
-                                            stringList.Add(data);
-                                        }
-                                    }
-                                    contextualParameter.GetType()
-                                        .GetMethod("SetValues")?
-                                        .Invoke(contextualParameter, new object[] { stringList });
-                                }
-                                break;
-                        }
-                        continue;
+                        SetValues(inputGroup, tree);
                     }
-
-                    inputGroup.Param.VolatileData.Clear();
-                    inputGroup.Param.ExpireSolution(false); // mark param as expired but don't recompute just yet!
-
-                    // Note: Param_String reads restobj.Data raw, while GH_Panel goes through
-                    // JsonConvert.DeserializeObject<string>. This asymmetry is preserved from the
-                    // original cascade — fixing it would change wire-format behavior for one of them.
-                    Func<ResthopperObject, IGH_Goo> convert = inputGroup.Param switch
+                    catch (Exception ex) when (BadRequestException.IsBadValue(ex))
                     {
-                        Param_Point _ => r => new GH_Point(JsonConvert.DeserializeObject<Point3d>(r.Data)),
-                        Param_Vector _ => r => new GH_Vector(JsonConvert.DeserializeObject<Vector3d>(r.Data)),
-                        Param_Integer _ => r => new GH_Integer(JsonConvert.DeserializeObject<int>(r.Data)),
-                        Param_Number _ => r => new GH_Number(JsonConvert.DeserializeObject<double>(r.Data)),
-                        Param_String _ => r => new GH_String(r.Data),
-                        Param_Line _ => r => new GH_Line(JsonConvert.DeserializeObject<Line>(r.Data)),
-                        Param_Curve _ => DeserializeCurve,
-                        Param_Circle _ => r => new GH_Circle(JsonConvert.DeserializeObject<Circle>(r.Data)),
-                        Param_Plane _ => r => new GH_Plane(JsonConvert.DeserializeObject<Plane>(r.Data)),
-                        Param_Rectangle _ => r => new GH_Rectangle(JsonConvert.DeserializeObject<Rectangle3d>(r.Data)),
-                        Param_Box _ => r => new GH_Box(JsonConvert.DeserializeObject<Box>(r.Data)),
-                        Param_Surface _ => r => new GH_Surface(JsonConvert.DeserializeObject<Surface>(r.Data)),
-                        Param_Brep _ => r => new GH_Brep(JsonConvert.DeserializeObject<Brep>(r.Data)),
-                        Param_Mesh _ => r => new GH_Mesh(JsonConvert.DeserializeObject<Mesh>(r.Data)),
-                        GH_NumberSlider _ => r => new GH_Number(JsonConvert.DeserializeObject<double>(r.Data)),
-                        Param_Boolean _ or GH_BooleanToggle _ => r => new GH_Boolean(JsonConvert.DeserializeObject<bool>(r.Data)),
-                        GH_Panel _ => r => new GH_String(JsonConvert.DeserializeObject<string>(r.Data)),
-                        _ => null
-                    };
-                    if (convert != null)
-                        AddTreeData(inputGroup.Param, tree, convert);
+                        throw new BadRequestException($"Couldn't read the value of input '{tree.ParamName}': {ex.Message}", ex);
+                    }
+                    // Only once its values were used, so a request that failed isn't later skipped as already set.
+                    inputGroup.CacheTree(tree);
                 }
             }
 
@@ -485,6 +489,109 @@ namespace compute.geometry
                     LogDebug($"Skipping {skippedInputs.Count} unchanged {inputWord}: {string.Join(", ", skippedInputs)}");
                 }
             }
+        }
+
+        void SetValues(InputGroup inputGroup, Resthopper.IO.DataTree<ResthopperObject> tree)
+        {
+            IGH_ContextualParameter contextualParameter = inputGroup.Param as IGH_ContextualParameter;
+            if (contextualParameter != null)
+            {
+                if (contextualParameter.AtLeast == 0)
+                    (contextualParameter as IGH_Param).Optional = true;
+
+                switch (ParamTypeName(inputGroup.Param))
+                {
+                    case "Boolean":
+                        BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Boolean(JsonConvert.DeserializeObject<bool>(r.Data)));
+                        break;
+                    case "Number":
+                        BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Number(JsonConvert.DeserializeObject<double>(r.Data)));
+                        break;
+                    case "Integer":
+                        BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Integer(JsonConvert.DeserializeObject<int>(r.Data)));
+                        break;
+                    case "Point":
+                        BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Point(JsonConvert.DeserializeObject<Point3d>(r.Data)));
+                        break;
+                    case "Plane":
+                        BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Plane(JsonConvert.DeserializeObject<Plane>(r.Data)));
+                        break;
+                    case "Line":
+                        BuildAndAssignContextualTree(contextualParameter, tree, r => new GH_Line(JsonConvert.DeserializeObject<Line>(r.Data)));
+                        break;
+                    case "Text":
+                        BuildAndAssignContextualTree(contextualParameter, tree, DeserializeText);
+                        break;
+                    case "Geometry":
+                        BuildAndAssignContextualTree(contextualParameter, tree, DeserializeGeometry);
+                        break;
+                    ////////////////////////////////////////////////
+                    /// VEKTORNODE: IO-HANDLERS — Selva Specific Contextual Inputs
+                    /// (Color / File / ValueList — none of these exist upstream).
+                    ////////////////////////////////////////////////
+                    // Color and File arrive as (possibly escaped) JSON strings; DeserializeText
+                    // already does the JsonConvert-with-Regex.Unescape fallback these need.
+                    case "Color":
+                        BuildAndAssignContextualTree(contextualParameter, tree, DeserializeText);
+                        break;
+                    case "File":
+                        BuildAndAssignContextualTree(contextualParameter, tree, DeserializeText);
+                        break;
+                    // ValueList assigns via SetValues (a flat string list), not a contextual
+                    // data tree, so it can't use BuildAndAssignContextualTree.
+                    case "ValueList":
+                        {
+                            var stringList = new List<string>();
+                            foreach (KeyValuePair<string, List<ResthopperObject>> entree in tree)
+                            {
+                                for (int i = 0; i < entree.Value.Count; i++)
+                                {
+                                    ResthopperObject restobj = entree.Value[i];
+                                    string data;
+                                    try
+                                    { data = JsonConvert.DeserializeObject<string>(restobj.Data) ?? restobj.Data.Trim('"'); }
+                                    catch { data = restobj.Data.Trim('"'); }
+                                    stringList.Add(data);
+                                }
+                            }
+                            contextualParameter.GetType()
+                                .GetMethod("SetValues")?
+                                .Invoke(contextualParameter, new object[] { stringList });
+                        }
+                        break;
+                }
+                return;
+            }
+
+            inputGroup.Param.VolatileData.Clear();
+            inputGroup.Param.ExpireSolution(false); // mark param as expired but don't recompute just yet!
+
+            // Note: Param_String reads restobj.Data raw, while GH_Panel goes through
+            // JsonConvert.DeserializeObject<string>. This asymmetry is preserved from the
+            // original cascade — fixing it would change wire-format behavior for one of them.
+            Func<ResthopperObject, IGH_Goo> convert = inputGroup.Param switch
+            {
+                Param_Point _      => r => new GH_Point(JsonConvert.DeserializeObject<Point3d>(r.Data)),
+                Param_Vector _     => r => new GH_Vector(JsonConvert.DeserializeObject<Vector3d>(r.Data)),
+                Param_Integer _    => r => new GH_Integer(JsonConvert.DeserializeObject<int>(r.Data)),
+                Param_Number _     => r => new GH_Number(JsonConvert.DeserializeObject<double>(r.Data)),
+                Param_String _     => r => new GH_String(r.Data),
+                Param_Line _       => r => new GH_Line(JsonConvert.DeserializeObject<Line>(r.Data)),
+                Param_Curve _      => DeserializeCurve,
+                Param_Circle _     => r => new GH_Circle(JsonConvert.DeserializeObject<Circle>(r.Data)),
+                Param_Plane _      => r => new GH_Plane(JsonConvert.DeserializeObject<Plane>(r.Data)),
+                Param_Rectangle _  => r => new GH_Rectangle(JsonConvert.DeserializeObject<Rectangle3d>(r.Data)),
+                Param_Box _        => r => new GH_Box(JsonConvert.DeserializeObject<Box>(r.Data)),
+                Param_Surface _    => r => new GH_Surface(JsonConvert.DeserializeObject<Surface>(r.Data)),
+                Param_Brep _       => r => new GH_Brep(JsonConvert.DeserializeObject<Brep>(r.Data)),
+                Param_Mesh _       => r => new GH_Mesh(JsonConvert.DeserializeObject<Mesh>(r.Data)),
+                GH_NumberSlider _  => r => new GH_Number(JsonConvert.DeserializeObject<double>(r.Data)),
+                Param_Boolean _ or GH_BooleanToggle _ => r => new GH_Boolean(JsonConvert.DeserializeObject<bool>(r.Data)),
+                GH_Panel _         => r => new GH_String(JsonConvert.DeserializeObject<string>(r.Data)),
+                _                  => null
+            };
+            if (convert != null)
+                AddTreeData(inputGroup.Param, tree, convert);
         }
 
         // Shared write path for SetInputs' regular-parameter dispatch. Each Param_X case
@@ -591,8 +698,7 @@ namespace compute.geometry
 
         static bool TryDeserializeStruct<T>(string data, out T value) where T : struct
         {
-            try
-            { value = JsonConvert.DeserializeObject<T>(data); return true; }
+            try { value = JsonConvert.DeserializeObject<T>(data); return true; }
             catch (JsonException) { value = default; return false; }
         }
 
@@ -851,18 +957,30 @@ namespace compute.geometry
                     HasErrors = true;
                 }
                 // ── BEGIN VEKTORNODE: SELVA FIX — warnings reported outside Debug ──
-                // Upstream gated this whole block on Config.Debug, so a production server never
-                // reported a warning. The response array is filled unconditionally; only the log
-                // line stays debug-only.
-                foreach (var msg in obj.RuntimeMessages(GH_RuntimeMessageLevel.Warning))
+                // Upstream returns warnings only when Config.Debug is on, so a production server never
+                // reports one. Outside Debug they are added here; the block below stays upstream's.
+                if (!Config.Debug)
                 {
-                    string warningMsg = $"{msg}: component \"{obj.Name}\" ({obj.InstanceGuid})";
-                    if (Config.Debug) Log.Warning(warningMsg);
-                    schema.Warnings.Add(warningMsg);
+                    foreach (var msg in obj.RuntimeMessages(GH_RuntimeMessageLevel.Warning))
+                        schema.Warnings.Add($"{msg}: component \"{obj.Name}\" ({obj.InstanceGuid})");
                 }
                 // ── END   VEKTORNODE: SELVA FIX — warnings reported outside Debug ──
-                if (Config.Debug)
+                // Warnings go back to callers only in debug mode; debug logging records them either way.
+                if (Config.Debug || Log.IsEnabled(LogEventLevel.Debug))
                 {
+                    foreach (var msg in obj.RuntimeMessages(GH_RuntimeMessageLevel.Warning))
+                    {
+                        string warningMsg = $"{msg}: component \"{obj.Name}\" ({obj.InstanceGuid})";
+                        if (Config.Debug)
+                        {
+                            Log.Warning(warningMsg);
+                            schema.Warnings.Add(warningMsg);
+                        }
+                        else
+                        {
+                            LogDebug($"Warning in grasshopper component: {warningMsg}");
+                        }
+                    }
                     foreach (var msg in obj.RuntimeMessages(GH_RuntimeMessageLevel.Remark))
                     {
                         LogDebug($"Remark in grasshopper component: \"{obj.Name}\" ({obj.InstanceGuid}): {msg}");
@@ -918,7 +1036,7 @@ namespace compute.geometry
                 var inputSchema = new InputParamSchema
                 {
                     Name = i.Key,
-                    ParamType = ParamTypeName(i.Value.Param),
+                    ParamType = i.Value.TypeName,
                     Description = i.Value.GetDescription(),
                     AtLeast = i.Value.GetAtLeast(),
                     AtMost = i.Value.GetAtMost(),
@@ -949,7 +1067,7 @@ namespace compute.geometry
                 outputs.Add(new IoParamSchema
                 {
                     Name = o.Key,
-                    ParamType = o.Value.TypeName,
+                    ParamType = outputTypeNames[o.Key],
                     // VEKTORNODE: PARAM-ID — output objects are looked up by Id client-side, so the
                     // schema must carry the same Instance Guid that ResthopperObject.Id is tagged with.
                     Id = o.Value.InstanceGuid.ToString()
@@ -970,8 +1088,9 @@ namespace compute.geometry
             };
         }
 
-        public static GH_Archive ArchiveFromUrl(string url)
+        public static GH_Archive ArchiveFromUrl(string url, out byte[] contents)
         {
+            contents = null;
             if (string.IsNullOrWhiteSpace(url))
                 return null;
 
@@ -982,6 +1101,11 @@ namespace compute.geometry
                 if (archive.ReadFromFile(url))
                 {
                     RegisterFileWatcher(url);
+                    try
+                    {
+                        contents = File.ReadAllBytes(url);
+                    }
+                    catch (IOException) { }
                     return archive;
                 }
                 return null;
@@ -1004,6 +1128,7 @@ namespace compute.geometry
                 {
                     throw ex.InnerException;
                 }
+                contents = byteArray;
 
                 try
                 {
@@ -1014,19 +1139,24 @@ namespace compute.geometry
                 catch (Exception) { }
 
                 var grasshopperXml = StripBom(System.Text.Encoding.UTF8.GetString(byteArray));
-                var xmlArchive = new GH_Archive();
-                if (xmlArchive.Deserialize_Xml(grasshopperXml))
+                if (ArchiveFromXml(grasshopperXml) is GH_Archive xmlArchive)
                     return xmlArchive;
             }
             return null;
         }
 
-        public static GH_Archive ArchiveFromBase64String(string blob)
+        public static GH_Archive ArchiveFromBase64String(string blob, out byte[] contents)
         {
+            contents = null;
             if (string.IsNullOrWhiteSpace(blob))
                 return null;
 
-            byte[] byteArray = Convert.FromBase64String(blob);
+            contents = Convert.FromBase64String(blob);
+            return ArchiveFromBytes(contents);
+        }
+
+        static GH_Archive ArchiveFromBytes(byte[] byteArray)
+        {
             try
             {
                 var byteArchive = new GH_Archive();
@@ -1036,11 +1166,21 @@ namespace compute.geometry
             catch (Exception) { }
 
             var grasshopperXml = StripBom(System.Text.Encoding.UTF8.GetString(byteArray));
-            var xmlArchive = new GH_Archive();
-            if (xmlArchive.Deserialize_Xml(grasshopperXml))
-                return xmlArchive;
+            return ArchiveFromXml(grasshopperXml);
+        }
 
-            return null;
+        // Content that isn't a definition in either format is null, like a binary archive that won't read.
+        static GH_Archive ArchiveFromXml(string xml)
+        {
+            var archive = new GH_Archive();
+            try
+            {
+                return archive.Deserialize_Xml(xml) ? archive : null;
+            }
+            catch (System.Xml.XmlException)
+            {
+                return null;
+            }
         }
 
         // strip bom from string -- [239, 187, 191] in byte array == (char)65279
@@ -1062,9 +1202,11 @@ namespace compute.geometry
                 param.ClearData();
                 param.CollectData();
                 defaultValue = SerializeDataTree(param.VolatileData, Param.InstanceGuid, param.Name);
+                TypeName = ParamTypeName(param);
             }
 
             public IGH_Param Param { get; }
+            public string TypeName { get; }
 
             public string GetDescription()
             {
@@ -1137,7 +1279,7 @@ namespace compute.geometry
                 if (p is IGH_ContextualParameter)
                 {
                     var par = p as IGH_ContextualParameter;
-                    var pTypeName = ParamTypeName(p);
+                    var pTypeName = TypeName;
                     var pType = par.GetType();
                     var props = pType.GetProperties(BindingFlags.NonPublic | BindingFlags.Instance);
                     var info = props.FirstOrDefault(x => x.Name == "Minimum");
@@ -1176,7 +1318,7 @@ namespace compute.geometry
                 {
                     var par = p as IGH_ContextualParameter;
                     var pType = par.GetType();
-                    var pTypeName = ParamTypeName(p);
+                    var pTypeName = TypeName;
                     var props = pType.GetProperties(BindingFlags.NonPublic | BindingFlags.Instance);
                     var info = props.FirstOrDefault(x => x.Name == "Maximum");
                     if (info != null)

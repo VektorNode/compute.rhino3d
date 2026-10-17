@@ -10,7 +10,7 @@
     <PublishSingleFile>False</PublishSingleFile>
     <AppendTargetFrameworkToOutputPath>False</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>False</AppendRuntimeIdentifierToOutputPath>
-    <Version>9.4.0</Version>
+    <Version>9.5.0</Version>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
 
@@ -52,18 +52,17 @@
     <PackageReference Include="Serilog.Expressions" Version="3.4.1" />
     <PackageReference Include="Serilog.Sinks.Console" Version="4.1.0" />
     <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
-    <PackageReference Include="System.Runtime.Caching" Version="9.0.0" />
-    <PackageReference Include="System.Runtime.Serialization.Formatters" Version="9.0.0" />
+    <PackageReference Include="System.Runtime.Caching" Version="10.0.12" />
+    <PackageReference Include="System.Runtime.Serialization.Formatters" Version="10.0.12" />
     <PackageReference Include="Rhino.Inside" Version="9.0.26084.13070-beta" />
   </ItemGroup>
 
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform(windows))">
-    <PackageReference Include="Microsoft.Windows.Compatibility" Version="9.0.0" />
-    <PackageReference Include="System.Management" Version="9.0.0" />
+      <PackageReference Include="Microsoft.Windows.Compatibility" Version="10.0.12" />
   </ItemGroup>
 
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform(linux))">
-    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+      <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
   </ItemGroup>
 
 </Project>

@@ -1,4 +1,5 @@
 ﻿using Serilog;
+using Serilog.Events;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -22,7 +23,7 @@ namespace compute.geometry
         /// RHINO_COMPUTE_KEY: the API key required to make POST requests.
         /// Leave empty to disable.
         /// </summary>
-        public static string ApiKey { get; private set; }
+        public static string ApiKey { get; set; }
 
         /// <summary>
         /// RHINO_COMPUTE_TIMEOUT: time in seconds for outbound HTTP fetches performed by this
@@ -86,7 +87,22 @@ namespace compute.geometry
         /// RHINO_COMPUTE_LOAD_GRASSHOPPER: load Grasshopper plugin at startup (defaults to true).
         /// Set to false to skip Grasshopper loading for faster startup when only using geometry endpoints.
         /// </summary>
-        public static bool LoadGrasshopper { get; private set; }
+        public static bool LoadGrasshopper { get; set; }
+
+        /// <summary>
+        /// RHINO_COMPUTE_ENABLE_SCRIPTING: expose the /script/* endpoints that run Python 3, Python 2
+        /// and C# source sent in the request body (defaults to false). These execute arbitrary code on
+        /// the server with no sandbox beyond the API key, which is required on every POST whenever
+        /// RHINO_COMPUTE_KEY is set (same rule as /grasshopper). Set a key and isolate the process
+        /// (dedicated user, systemd hardening or a container) when enabling this on a server.
+        /// </summary>
+        public static bool EnableScripting { get; private set; }
+
+        /// <summary>
+        /// RHINO_COMPUTE_COMPRESSION: accept gzip request bodies and gzip answers for clients
+        /// that ask (Accept-Encoding: gzip). On by default; false turns it off.
+        /// </summary>
+        public static bool Compression { get; private set; }
 
         /// <summary>
         /// RHINO_COMPUTE_EVENT_SINK_HOSTS: hosts (comma or semicolon separated, optional
@@ -113,6 +129,13 @@ namespace compute.geometry
         public static bool Debug { get; private set; }
 
         /// <summary>
+        /// RHINO_COMPUTE_LOG_LEVEL: the lowest level the logs record (Verbose, Debug, Information,
+        /// Warning, Error or Fatal). Unlike RHINO_COMPUTE_DEBUG, it doesn't change what callers get
+        /// back. Defaults to Debug when RHINO_COMPUTE_DEBUG is on, otherwise Information.
+        /// </summary>
+        public static LogEventLevel LogLevel { get; private set; }
+
+        /// <summary>
         /// Loads config from environment variables (or uses defaults).
         /// </summary>
         public static void Load()
@@ -125,9 +148,10 @@ namespace compute.geometry
             CachePhysicalLimitPercent = GetEnvironmentVariable<int>(RHINO_COMPUTE_CACHE_PHYSICAL_LIMIT_PERCENT, 70);
             LogPath = GetEnvironmentVariable(RHINO_COMPUTE_LOG_PATH, Path.Combine(Path.GetTempPath(), "Compute", "Logs"), COMPUTE_LOG_PATH);
             LogRetainDays = GetEnvironmentVariable(RHINO_COMPUTE_LOG_RETAIN_DAYS, 10, COMPUTE_LOG_RETAIN_DAYS);
-            // VEKTORNODE: SELVA — default headless doc creation ON (upstream default is false).
-            CreateHeadlessDoc = GetEnvironmentVariable<bool>(RHINO_COMPUTE_CREATE_HEADLESS_DOC, true);
+            CreateHeadlessDoc = GetEnvironmentVariable<bool>(RHINO_COMPUTE_CREATE_HEADLESS_DOC, false);
             LoadGrasshopper = GetEnvironmentVariable<bool>(RHINO_COMPUTE_LOAD_GRASSHOPPER, true);
+            EnableScripting = GetEnvironmentVariable<bool>(RHINO_COMPUTE_ENABLE_SCRIPTING, false);
+            Compression = GetEnvironmentVariable<bool>(RHINO_COMPUTE_COMPRESSION, true);
             // VEKTORNODE: SELVA — live events.
             EventSinkHosts = GetEnvironmentVariable(RHINO_COMPUTE_EVENT_SINK_HOSTS, DEFAULT_EVENT_SINK_HOSTS)
                 .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
@@ -141,6 +165,7 @@ namespace compute.geometry
             Debug = false;
 #endif
             Debug = GetEnvironmentVariable(RHINO_COMPUTE_DEBUG, Debug);
+            LogLevel = GetLogLevel(RHINO_COMPUTE_LOG_LEVEL, Debug ? LogEventLevel.Debug : LogEventLevel.Information);
 
             foreach (var name in ignored)
             {
@@ -161,8 +186,11 @@ namespace compute.geometry
         const string RHINO_COMPUTE_LOG_PATH = "RHINO_COMPUTE_LOG_PATH";
         const string RHINO_COMPUTE_LOG_RETAIN_DAYS = "RHINO_COMPUTE_LOG_RETAIN_DAYS";
         const string RHINO_COMPUTE_DEBUG = "RHINO_COMPUTE_DEBUG";
+        const string RHINO_COMPUTE_LOG_LEVEL = "RHINO_COMPUTE_LOG_LEVEL";
         const string RHINO_COMPUTE_CREATE_HEADLESS_DOC = "RHINO_COMPUTE_CREATE_HEADLESS_DOC";
         const string RHINO_COMPUTE_LOAD_GRASSHOPPER = "RHINO_COMPUTE_LOAD_GRASSHOPPER";
+        const string RHINO_COMPUTE_ENABLE_SCRIPTING = "RHINO_COMPUTE_ENABLE_SCRIPTING";
+        const string RHINO_COMPUTE_COMPRESSION = "RHINO_COMPUTE_COMPRESSION";
         const string RHINO_COMPUTE_EVENT_SINK_HOSTS = "RHINO_COMPUTE_EVENT_SINK_HOSTS";
 
         // Host-only entries, so any port on the loopback interface matches: a dev Selva server
@@ -177,6 +205,17 @@ namespace compute.geometry
         readonly static string[] ignored = new string[] { "COMPUTE_BACKEND_PORT" };
 
         readonly static List<string> warnings = new List<string>();
+
+        static LogEventLevel GetLogLevel(string name, LogEventLevel defaultValue)
+        {
+            string value = Environment.GetEnvironmentVariable(name);
+            if (string.IsNullOrWhiteSpace(value))
+                return defaultValue;
+            if (Enum.TryParse(value.Trim(), true, out LogEventLevel level) && Enum.IsDefined(typeof(LogEventLevel), level))
+                return level;
+            warnings.Add($"{name} set to '{value}'; use Verbose, Debug, Information, Warning, Error or Fatal. Using {defaultValue}.");
+            return defaultValue;
+        }
 
         static T GetEnvironmentVariable<T>(string name, T defaultValue, string deprecatedName = null)
         {

@@ -257,7 +257,7 @@ namespace Hops
                 {
                     using (var cts = CreateTimeoutCts())
                     {
-                        var response = HttpClient.GetAsync(path, cts.Token).Result;
+                        var response = HttpClientFor(path).GetAsync(path, cts.Token).Result;
                         string mediaType = response.Content.Headers.ContentType.MediaType.ToLowerInvariant();
                         if (mediaType.Contains("json"))
                             rc = PathType.Server;
@@ -347,12 +347,14 @@ namespace Hops
             System.Threading.Tasks.Task<System.Net.Http.HttpResponseMessage> responseTask;
             // Per-request disposables that need to outlive the if/else so the response can be
             // awaited safely. Disposed in a single sweep at the end of the method.
-            System.Net.Http.StringContent contentToDispose = null;
+            System.Net.Http.HttpContent contentToDispose = null;
             System.Net.Http.HttpRequestMessage requestToDispose = null;
             System.Threading.CancellationTokenSource ctsToDispose = null;
+            string requestUrl;
             if (performPost)
             {
                 string postUrl = Servers.GetDescriptionPostUrl();
+                requestUrl = postUrl;
                 var schema = new Schema();
                 if (pathType != PathType.InternalizedDefinition)
                 {
@@ -399,7 +401,7 @@ namespace Hops
                 schema.FileName = filename;
                 string inputJson = JsonConvert.SerializeObject(schema);
                 parentComponent.HttpRecord.IoRequest = BuildRequestEnvelope(postUrl, "POST", inputJson);
-                var content = new System.Net.Http.StringContent(inputJson, Encoding.UTF8, "application/json");
+                var content = CreateJsonContent(postUrl, inputJson);
                 var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, postUrl) { Content = content };
                 AddApiKeyHeader(request);
                 var cts = CreateTimeoutCts();
@@ -407,7 +409,7 @@ namespace Hops
                 if (!String.IsNullOrEmpty(filename))
                     fileNameMsg = $" with {filename}";
                 HopsLog.Log.Debug($"Sending POST request to {postUrl}{fileNameMsg}");
-                responseTask = HttpClient.SendAsync(request, cts.Token);
+                responseTask = HttpClientFor(postUrl).SendAsync(request, cts.Token);
                 parentComponent.HttpRecord.Schema = schema;
                 contentToDispose = content;
                 requestToDispose = request;
@@ -415,9 +417,10 @@ namespace Hops
             }
             else
             {
+                requestUrl = address;
                 parentComponent.HttpRecord.IoRequest = BuildRequestEnvelope(address, "GET");
                 var cts = CreateTimeoutCts();
-                responseTask = HttpClient.GetAsync(address, cts.Token);
+                responseTask = HttpClientFor(address).GetAsync(address, cts.Token);
                 ctsToDispose = cts;
             }
             if (responseTask != null)
@@ -427,6 +430,7 @@ namespace Hops
                 {
                     var responseMessage = responseTask.Result;
                     HopsLog.Log.Debug($"Received response {responseMessage.StatusCode} in {sw.ElapsedMilliseconds}ms");
+                    NoteUploadSupport(requestUrl, responseMessage);
                     var remoteSolvedData = responseMessage.Content;
                     var stringResult = remoteSolvedData.ReadAsStringAsync().Result;
                     parentComponent.HttpRecord.IoResponse = stringResult;
@@ -439,7 +443,7 @@ namespace Hops
                     if (responseMessage.StatusCode == System.Net.HttpStatusCode.Unauthorized)
                     {
                         var serverMessage = string.IsNullOrWhiteSpace(stringResult)
-                            ? "Server returned 401 Unauthorized — verify the RHINO_COMPUTE_KEY environment variable on the Hops client matches the server's configured key."
+                            ? "Server returned 401 Unauthorized — verify the API key in the Hops settings (or, when that is empty, the RHINO_COMPUTE_KEY environment variable) matches the server's configured key."
                             : $"Server returned 401 Unauthorized: {stringResult.Trim()}";
                         HopsLog.Log.Error(serverMessage);
                         var errSchema = new IoResponseSchema();
@@ -572,8 +576,9 @@ namespace Hops
                 if (!String.IsNullOrEmpty(responseSchema.FileName))
                     fileNameMsg = $" in {responseSchema.FileName}";
                 HopsLog.Log.Debug($"Compute.Geometry found {responseSchema.InputNames.Count} input{inputSuffix} and {responseSchema.OutputNames.Count} output{outputSuffix}{fileNameMsg}");
-                inputParams = new Dictionary<string, Tuple<InputParamSchema, IGH_Param>>();
-                outputParams = new Dictionary<string, IGH_Param>();
+                // Assigned only once complete, so a failure part way leaves no partial set for later solves to send.
+                var inputs = new Dictionary<string, Tuple<InputParamSchema, IGH_Param>>();
+                var outputs = new Dictionary<string, IGH_Param>();
                 // Defensive: a well-formed /io success response always populates these, but
                 // guard against null so a partial/unexpected body can't NullReference here.
                 foreach (var input in responseSchema.Inputs ?? Enumerable.Empty<InputParamSchema>())
@@ -584,7 +589,7 @@ namespace Hops
                         var chunks = inputParamName.Split(new char[] { ':' });
                         inputParamName = chunks[chunks.Length - 1];
                     }
-                    inputParams[inputParamName] = Tuple.Create(input, ParamFromIoResponseSchema(input));
+                    inputs[inputParamName] = Tuple.Create(input, ParamFromIoResponseSchema(input));
                 }
                 foreach (var output in responseSchema.Outputs ?? Enumerable.Empty<IoParamSchema>())
                 {
@@ -594,8 +599,10 @@ namespace Hops
                         var chunks = outputParamName.Split(new char[] { ':' });
                         outputParamName = chunks[chunks.Length - 1];
                     }
-                    outputParams[outputParamName] = ParamFromIoResponseSchema(output);
+                    outputs[outputParamName] = ParamFromIoResponseSchema(output);
                 }
+                inputParams = inputs;
+                outputParams = outputs;
                 parentComponent.HttpRecord.IoResponseSchema = responseSchema;
             }
         }
@@ -662,19 +669,89 @@ namespace Hops
         {
             get
             {
+                // Asking for gzip is harmless: a server with compression off answers uncompressed.
                 if (httpClient == null)
-                {
-                    // One shared HttpClient for all requests (avoids per-request socket allocation).
-                    // Timeout is intentionally infinite — per-request CancellationTokenSource
-                    // controls actual deadlines so HopsAppSettings.HttpTimeout values larger than
-                    // 100s aren't capped by HttpClient's default.
-                    httpClient = new System.Net.Http.HttpClient
-                    {
-                        Timeout = System.Threading.Timeout.InfiniteTimeSpan
-                    };
-                }
+                    httpClient = CreateHttpClient(compressionEnabled);
                 return httpClient;
             }
+        }
+
+        // A server on this machine gets plain requests and answers, as it did before compression.
+        static System.Net.Http.HttpClient localHttpClient = null;
+        internal static System.Net.Http.HttpClient HttpClientFor(string url)
+        {
+            if (!IsLocalServer(url))
+                return HttpClient;
+            if (localHttpClient == null)
+                localHttpClient = CreateHttpClient(false);
+            return localHttpClient;
+        }
+
+        static System.Net.Http.HttpClient CreateHttpClient(bool decompress)
+        {
+            var handler = new System.Net.Http.HttpClientHandler();
+            if (decompress)
+                handler.AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate;
+
+            // Shared across requests (avoids per-request socket allocation).
+            // Timeout is intentionally infinite — per-request CancellationTokenSource
+            // controls actual deadlines so HopsAppSettings.HttpTimeout values larger than
+            // 100s aren't capped by HttpClient's default.
+            return new System.Net.Http.HttpClient(handler)
+            {
+                Timeout = System.Threading.Timeout.InfiniteTimeSpan
+            };
+        }
+
+        // HOPS_COMPRESSION=false (or 0) stops Hops asking for compressed answers and compressing uploads.
+        const string HOPS_COMPRESSION = "HOPS_COMPRESSION";
+        const int MIN_COMPRESSED_UPLOAD_BYTES = 1024;
+        static readonly bool compressionEnabled = !(Environment.GetEnvironmentVariable(HOPS_COMPRESSION) is string compressionSetting
+            && (compressionSetting.Trim() == "0" || compressionSetting.Trim().Equals("false", StringComparison.OrdinalIgnoreCase)));
+
+        // Servers (scheme://host:port) whose answers carried Accept-Encoding: gzip (RFC 7694),
+        // i.e. that accept gzip request bodies. Older servers would reject a compressed upload.
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> gzipUploadServers =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, bool>();
+
+        static string ServerKey(string url)
+            => Uri.TryCreate(url, UriKind.Absolute, out Uri uri) ? uri.GetLeftPart(UriPartial.Authority) : url;
+
+        // Compressing for a server on this machine costs time and saves nothing.
+        static bool IsLocalServer(string url)
+            => Uri.TryCreate(url, UriKind.Absolute, out Uri uri)
+                && (uri.IsLoopback || uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase));
+
+        static void NoteUploadSupport(string url, System.Net.Http.HttpResponseMessage response)
+        {
+            if (!compressionEnabled || string.IsNullOrEmpty(url) || IsLocalServer(url))
+                return;
+            bool acceptsGzip = response.Headers.TryGetValues("Accept-Encoding", out var values)
+                && values.Any(v => v.IndexOf("gzip", StringComparison.OrdinalIgnoreCase) >= 0);
+            if (acceptsGzip)
+                gzipUploadServers[ServerKey(url)] = true;
+            else
+                gzipUploadServers.TryRemove(ServerKey(url), out _);
+        }
+
+        // The JSON body for a POST, gzipped when the server has said it accepts gzip uploads.
+        static System.Net.Http.HttpContent CreateJsonContent(string url, string json)
+        {
+            if (compressionEnabled && json.Length >= MIN_COMPRESSED_UPLOAD_BYTES && gzipUploadServers.ContainsKey(ServerKey(url)))
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(json);
+                using (var packed = new MemoryStream())
+                {
+                    using (var gzip = new System.IO.Compression.GZipStream(packed, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+                        gzip.Write(bytes, 0, bytes.Length);
+                    var content = new System.Net.Http.ByteArrayContent(packed.ToArray());
+                    content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+                    content.Headers.ContentEncoding.Add("gzip");
+                    HopsLog.Log.Debug($"Compressed the request body for {url}: {packed.Length} of {bytes.Length} bytes");
+                    return content;
+                }
+            }
+            return new System.Net.Http.StringContent(json, Encoding.UTF8, "application/json");
         }
 
         // Per-request timeout via CancellationTokenSource. Uses HopsAppSettings.HttpTimeout
@@ -689,8 +766,13 @@ namespace Hops
         // key is configured. Headers must go on the request, not the shared HttpClient.
         static void AddApiKeyHeader(System.Net.Http.HttpRequestMessage request)
         {
-            if (!string.IsNullOrEmpty(HopsAppSettings.APIKey))
-                request.Headers.Add(API_KEY_NAME, HopsAppSettings.APIKey);
+            string apiKey = HopsAppSettings.RequestAPIKey;
+            // A nested call back into the server Hops runs on needs that server's key, whatever Hops' settings say.
+            string serverKey = Environment.GetEnvironmentVariable("RHINO_COMPUTE_KEY");
+            if (!string.IsNullOrEmpty(serverKey) && Servers.IsParentServer(request.RequestUri))
+                apiKey = serverKey;
+            if (!string.IsNullOrEmpty(apiKey))
+                request.Headers.Add(API_KEY_NAME, apiKey);
         }
 
         static Schema SafeSchemaDeserialize(string data)
@@ -737,7 +819,7 @@ namespace Hops
             }
             string requestContent = BuildRequestEnvelope(solveUrl, "POST", inputJson);
             parentComponent.HttpRecord.SolveRequest = requestContent;
-            using (var content = new System.Net.Http.StringContent(inputJson, Encoding.UTF8, "application/json"))
+            using (var content = CreateJsonContent(solveUrl, inputJson))
             using (var request = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, solveUrl) { Content = content })
             using (var cts = CreateTimeoutCts())
             {
@@ -745,13 +827,14 @@ namespace Hops
                 try
                 {
                 AddApiKeyHeader(request);
-                var postTask = HttpClient.SendAsync(request, cts.Token);
+                var postTask = HttpClientFor(solveUrl).SendAsync(request, cts.Token);
                 var fileNameMsg = String.Empty;
                 if (!String.IsNullOrEmpty(inputSchema.FileName))
                     fileNameMsg = $" with {inputSchema.FileName} input values";
                 HopsLog.Log.Debug($"Sending POST request to {solveUrl}{fileNameMsg}");
                 var responseMessage = postTask.Result;
                 HopsLog.Log.Debug($"Received response {responseMessage.StatusCode} in {sw.ElapsedMilliseconds}ms");
+                NoteUploadSupport(solveUrl, responseMessage);
                 var remoteSolvedData = responseMessage.Content;
                 var stringResult = remoteSolvedData.ReadAsStringAsync().Result;
                 parentComponent.HttpRecord.SolveResponse = stringResult;
@@ -785,11 +868,11 @@ namespace Hops
                         inputJson = JsonConvert.SerializeObject(inputSchema);
                         requestContent = BuildRequestEnvelope(solveUrl, "POST", inputJson);
                         parentComponent.HttpRecord.SolveRequest = requestContent;
-                        using var content2 = new System.Net.Http.StringContent(inputJson, Encoding.UTF8, "application/json");
+                        using var content2 = CreateJsonContent(solveUrl, inputJson);
                         using var request2 = new System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, solveUrl) { Content = content2 };
                         using var cts2 = CreateTimeoutCts();
                         AddApiKeyHeader(request2);
-                        postTask = HttpClient.SendAsync(request2, cts2.Token);
+                        postTask = HttpClientFor(solveUrl).SendAsync(request2, cts2.Token);
                         var fileNameMsg2 = String.Empty;
                         if (!String.IsNullOrEmpty(inputSchema.FileName))
                             fileNameMsg2 = $" with {inputSchema.FileName} input values";
@@ -797,6 +880,7 @@ namespace Hops
                         var sw2 = Stopwatch.StartNew();
                         responseMessage = postTask.Result;
                         HopsLog.Log.Debug($"Received response {responseMessage.StatusCode} in {sw2.ElapsedMilliseconds}ms");
+                        NoteUploadSupport(solveUrl, responseMessage);
                         remoteSolvedData = responseMessage.Content;
                         stringResult = remoteSolvedData.ReadAsStringAsync().Result;
                         parentComponent.HttpRecord.SolveResponse = stringResult;
@@ -849,7 +933,7 @@ namespace Hops
                     // Use the server's response body when available — it explains whether the
                     // header was missing or the key was wrong. Fall back to a generic message.
                     var serverMessage = string.IsNullOrWhiteSpace(stringResult)
-                        ? "Server returned 401 Unauthorized — verify the RHINO_COMPUTE_KEY environment variable on the Hops client matches the server's configured key."
+                        ? "Server returned 401 Unauthorized — verify the API key in the Hops settings (or, when that is empty, the RHINO_COMPUTE_KEY environment variable) matches the server's configured key."
                         : $"Server returned 401 Unauthorized: {stringResult.Trim()}";
                     HopsLog.Log.Error(serverMessage);
                     badSchema.Errors.Add(serverMessage);
@@ -1189,44 +1273,46 @@ namespace Hops
         {
             if (parameters == null)
             {
-                parameters = new List<IGH_Param>();
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Arc());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Boolean());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Box());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Brep());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Circle());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Colour());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Complex());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Culture());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Curve());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Field());
+                // Published only once complete: Hops components in one process can look types up at the same time.
+                var list = new List<IGH_Param>();
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Arc());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Boolean());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Box());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Brep());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Circle());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Colour());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Complex());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Culture());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Curve());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Field());
                 //FilePath has the same ParamType as String
-                //parameters.Add(new Grasshopper.Kernel.Parameters.Param_FilePath());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_GenericObject());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Geometry());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Group());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Guid());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Integer());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Interval());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Interval2D());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_LatLonLocation());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Line());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Matrix());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Mesh());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_MeshFace());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_MeshParameters());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Number());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Plane());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Point());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Rectangle());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_String());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_StructurePath());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_SubD());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Surface());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Time());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Transform());
-                parameters.Add(new Grasshopper.Kernel.Parameters.Param_Vector());
-                parameters.Add(new Grasshopper.Rhinoceros.Model.Params.Param_ModelObject());
+                //list.Add(new Grasshopper.Kernel.Parameters.Param_FilePath());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_GenericObject());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Geometry());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Group());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Guid());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Integer());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Interval());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Interval2D());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_LatLonLocation());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Line());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Matrix());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Mesh());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_MeshFace());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_MeshParameters());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Number());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Plane());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Point());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Rectangle());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_String());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_StructurePath());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_SubD());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Surface());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Time());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Transform());
+                list.Add(new Grasshopper.Kernel.Parameters.Param_Vector());
+                list.Add(new Grasshopper.Rhinoceros.Model.Params.Param_ModelObject());
+                parameters = list;
             }
             foreach(var p in parameters)
             {

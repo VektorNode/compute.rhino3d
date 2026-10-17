@@ -1,11 +1,13 @@
 ﻿using System;
 using System.Linq;
+using Compute.Http;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Newtonsoft.Json;
 using Serilog;
+using Serilog.Events;
 
 namespace compute.geometry
 {
@@ -29,6 +31,8 @@ namespace compute.geometry
                     });
             });
             services.AddHealthChecks();
+            if (Config.Compression)
+                services.AddHttpCompression();
         }
 
         public void Configure(IApplicationBuilder app)
@@ -43,6 +47,15 @@ namespace compute.geometry
             app.UseExceptionHandler(errApp => errApp.Run(async ctx =>
             {
                 var ex = ctx.Features.Get<IExceptionHandlerFeature>()?.Error;
+                if (ex is BadRequestException badRequest)
+                {
+                    // About the caller's own request, so it keeps its message in every build.
+                    Log.Warning("Bad request {Method} {Path}: {Message}", ctx.Request.Method, ctx.Request.Path, badRequest.Message);
+                    ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                    ctx.Response.ContentType = "application/json";
+                    await ctx.Response.WriteAsync(JsonConvert.SerializeObject(new { error = "Bad Request", message = badRequest.Message }));
+                    return;
+                }
 
                 string category = ex == null ? null
                     : ex.GetType().Name.Contains("Json") ? "Malformed JSON received"
@@ -64,7 +77,7 @@ namespace compute.geometry
                     .Select(l => l.TrimStart())
                     .ToArray() ?? Array.Empty<string>();
 
-                // VektorNode change: a stable, machine-readable error code, emitted in
+                // VEKTORNODE: SELVA — a stable, machine-readable error code, emitted in
                 // BOTH debug and production. The human `message` is scrubbed in prod, so
                 // the code is the only reliable signal the client can classify on. A
                 // stale-pointer cache miss surfaces as "definition_not_cached", which the
@@ -77,6 +90,8 @@ namespace compute.geometry
                 await ctx.Response.WriteAsync(JsonConvert.SerializeObject(body));
             }));
 
+            if (Config.Compression)
+                app.UseHttpCompression();
             app.UseRouting();
             app.UseCors();
             if (!string.IsNullOrEmpty(Config.ApiKey))
@@ -87,6 +102,7 @@ namespace compute.geometry
                 MapValidateEndpoint(builder);
                 FixedEndPointsModule.MapEndpoints(builder);
                 ResthopperEndpointsModule.MapEndpoints(builder);
+                ScriptEndpointsModule.MapEndpoints(builder);
                 RhinoGetModule.MapEndpoints(builder);
                 RhinoPostModule.MapEndpoints(builder);
             });
@@ -131,7 +147,7 @@ namespace compute.geometry
         {
             Program.RhinoCore = new Rhino.Runtime.InProcess.RhinoCore(null, Rhino.Runtime.InProcess.WindowStyle.NoWindow);
 
-            if (Config.Debug)
+            if (Config.Debug || Config.LogLevel <= LogEventLevel.Debug)
                 Rhino.RhinoApp.SendWriteToConsole = true;
 
             Environment.SetEnvironmentVariable("RHINO_TOKEN", null, EnvironmentVariableTarget.Process);
@@ -305,7 +321,7 @@ namespace compute.geometry
             }
             else
             {
-                Log.Information("(3/4) Skipping grasshopper (disabled via RHINO_COMPUTE_LOAD_GRASSHOPPER)");
+                Log.Information("(3/4) Skipping grasshopper (disabled via RHINO_COMPUTE_LOAD_GRASSHOPPER or -load-grasshopper:false)");
             }
 
             Log.Information("(4/4) Loading compute plug-ins");
@@ -313,6 +329,47 @@ namespace compute.geometry
             if (loadComputePlugins != null)
                 loadComputePlugins.Invoke(null, null);
 
+            if (Config.LoadGrasshopper)
+                WarmGrasshopperTypeCache();
+        }
+
+        // Grasshopper's GH_TypeCache fills its tables without a lock, and nested requests read Grasshopper data on
+        // several threads at once. Looking up every type here, before any request, leaves the tables only read.
+        static void WarmGrasshopperTypeCache()
+        {
+            try
+            {
+                var cache = typeof(Grasshopper.Kernel.Data.GH_Path).Assembly.GetType("Grasshopper.Kernel.Data.GH_TypeCache");
+                var findGooType = cache?.GetMethod("FindGooType", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                if (findGooType == null)
+                    return;
+                var gooType = typeof(Grasshopper.Kernel.Types.IGH_Goo);
+                int count = 0;
+                foreach (var library in Grasshopper.Instances.ComponentServer.Libraries)
+                {
+                    Type[] types;
+                    try
+                    {
+                        types = library.Assembly.GetExportedTypes();
+                    }
+                    catch (Exception)
+                    {
+                        continue;
+                    }
+                    foreach (var type in types)
+                    {
+                        if (type.IsAbstract || type.IsInterface || !gooType.IsAssignableFrom(type))
+                            continue;
+                        findGooType.Invoke(null, new object[] { type.FullName });
+                        count++;
+                    }
+                }
+                Log.Debug("Warmed Grasshopper's type cache with {Count} types", count);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Unable to warm Grasshopper's type cache");
+            }
         }
 
     }

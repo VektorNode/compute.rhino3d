@@ -113,7 +113,7 @@ requests while the child processes are launching.")]
 
             var path = System.IO.Path.Combine(Config.LogPath, "log-rhino-compute-.txt");
             var limit = Config.LogRetainDays;
-            var level = Config.Debug ? LogEventLevel.Debug : LogEventLevel.Information;
+            var level = Config.LogLevel;
 
             var loggerConfig = new LoggerConfiguration()
             .MinimumLevel.Is(level)
@@ -130,6 +130,10 @@ requests while the child processes are launching.")]
                 theme: Serilog.Sinks.SystemConsole.Themes.AnsiConsoleTheme.Literate)
             .WriteTo.File(new ExpressionTemplate("RC   [{@t:HH:mm:ss} {@l:u3}] {@m}\n{@x}"), path, rollingInterval: RollingInterval.Day, retainedFileCountLimit: limit);
             Log.Logger = loggerConfig.CreateLogger();
+
+            // Config.Load() runs before the logger exists, so anything it rejected was buffered; log it now.
+            foreach (var warning in Config.Warnings)
+                Log.Warning("Configuration: {Warning}", warning);
 
             int port = -1;
             Parser.Default.ParseArguments<Options>(args).WithParsed(o =>
@@ -188,6 +192,9 @@ requests while the child processes are launching.")]
                 Environment.Exit(1);
             });
 
+            // The options above set environment variables (--apikey, --timeout, --max-request-size), so load again.
+            Config.Load();
+
             var host = Host.CreateDefaultBuilder(args)
                 .UseSerilog()
                 .ConfigureWebHostDefaults(webBuilder =>
@@ -228,6 +235,12 @@ requests while the child processes are launching.")]
             if (string.IsNullOrWhiteSpace(Config.ApiKey))
                 Log.Warning("RHINO_COMPUTE_KEY is not set; API authentication is disabled. All endpoints are open to any caller.");
 
+            if (Config.Compression)
+                Log.Information("Compression is on: gzip request bodies are accepted, and answers of {Minimum} bytes or more are gzipped for clients that ask (RHINO_COMPUTE_COMPRESSION=false turns it off)",
+                    Compute.Http.CompressionMiddleware.MinimumBytes);
+            else
+                Log.Information("Compression is off (RHINO_COMPUTE_COMPRESSION)");
+
             Log.Debug($"Config:");
             Log.Debug("  Max Request Size = {RequestSize}", (Config.MaxRequestSize / 1024.0 / 1024.0).ToString("F2") + " MB");
             Log.Debug("  Timeout = {Timeout}", FormatTimeout(Config.ReverseProxyRequestTimeout));
@@ -242,6 +255,8 @@ requests while the child processes are launching.")]
             Log.Debug("  Create Headless Document = {CreateHeadlessDoc}", createHeadlessDoc.ToString());
             bool blockPrivateUrls = Boolean.TryParse(Environment.GetEnvironmentVariable("RHINO_COMPUTE_BLOCK_PRIVATE_URLS"), out var blockPrivate) && blockPrivate;
             Log.Debug("  Block Private URLs = {BlockPrivateUrls}", blockPrivateUrls.ToString());
+            Log.Debug("  Compression = {Compression}", Config.Compression.ToString());
+            Log.Debug("  Log Level = {LogLevel}", Config.LogLevel);
             Log.Debug("  Log Path = {LogPath}", Config.LogPath);
 
             var logger = host.Services.GetRequiredService<ILogger<ReverseProxyModule>>();

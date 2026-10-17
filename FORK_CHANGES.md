@@ -49,51 +49,43 @@ Rhino writes `.ghx` with a UTF-8 BOM. `Encoding.UTF8.GetString` keeps the BOM as
 character, so the XML parse failed on definitions saved from Rhino. The BOM is stripped before
 parsing.
 
-### 3. Headless doc creation default ON (SELVA)
-**File:** `src/compute.geometry/Config.cs`
-
-`RHINO_COMPUTE_CREATE_HEADLESS_DOC` defaults to **on** (upstream default is `false`).
-
-### 4. Larger default max request size (SELVA)
+### 3. Larger default max request size (SELVA)
 **File:** `src/compute.geometry/Config.cs`
 
 `RHINO_COMPUTE_MAX_REQUEST_SIZE` default raised from 50 MB to 300 MB.
 
-### 5. Parameter-Id threading + contextual inputs (PARAM-ID, IO-HANDLERS)
+### 4. Parameter-Id threading + contextual inputs (PARAM-ID, IO-HANDLERS)
 **Files:** `src/compute.geometry/GrasshopperDefinition.cs`, `src/compute.geometry/IO/Schema.cs`
 
 Every emitted `ResthopperObject` is tagged with its source Grasshopper parameter's Instance Guid
 so the client can demux outputs by parameter. Adds Selva contextual inputs, hierarchical group
 names, enumerated values, and per-parameter declared defaults on the schema.
 
-### 6. Errored-solve caching, opt-in (CACHE-ERRORED-SOLVES)
+### 5. Errored-solve caching, opt-in (CACHE-ERRORED-SOLVES)
 **Files:** `src/compute.geometry/IO/Schema.cs`, `src/compute.geometry/ResthopperEndpoints.cs`
 
 By default an errored solve is not served from cache. Adds the opt-in flag and the detection of
 whether a cached solve-result JSON came from an errored-but-completed solve.
 
-### 7. Undo recording forced off server-side (SELVA FIX)
+### 6. Undo recording forced off server-side (SELVA FIX)
 **File:** `src/compute.geometry/ResthopperEndpoints.cs`
 
-An active undo recorder retains every solve's state, so server-side undo must stay off.
+Only when `RHINO_COMPUTE_CREATE_HEADLESS_DOC` is on (upstream's default, off, is kept). With an active
+doc, `GH_Document.NewSolution` calls `RhinoDoc.BeginUndoRecord`, which in headless Linux Rhino invokes
+a GC'd `Command.UndoCallback` delegate and kills the child, and the recorder retains every solve's
+state. Undo is turned off on the document the solve creates.
 
-### 8. Stable error code on 500s (SELVA)
-**File:** `src/compute.geometry/Startup.cs`
+### 7. Stable error code on 500s (SELVA)
+**Files:** `src/compute.geometry/Startup.cs`, `src/compute.geometry/ResthopperEndpoints.cs` (`DefinitionNotCachedException`)
 
 Adds a machine-readable `code` to the error body in **both** debug and production. The human
 `message` is scrubbed in prod, so the code is the only thing a client can classify on. A
-stale-pointer cache miss surfaces as `definition_not_cached`, which the `@selvajs/compute`
-client uses to transparently re-upload the definition.
+stale-pointer cache miss (a `pointer` that no longer resolves and no `algo` to fall back on)
+surfaces as a 500 with `definition_not_cached`, which the `@selvajs/compute` client uses to
+transparently re-upload the definition. Upstream answers every failed definition load with a
+400 `BadRequestException`; that stays for everything except the stale pointer.
 
-### 9. Multipart proxy passthrough (SELVA FIX)
-**File:** `src/rhino.compute/ReverseProxy.cs`
-
-Upstream read every POST body as a string and re-sent it as `application/json`, destroying the
-multipart boundary — so `grasshopper/validate` and other file uploads broke behind IIS. Fix:
-detect `multipart/form-data` and stream the body through as-is, preserving boundary + binary
-content and forwarding `Content-Length`.
-
-### 10. Dead-child eviction + proxy retry (SELVA FIX)
+### 8. Dead-child eviction + proxy retry (SELVA FIX)
 **Files:** `src/rhino.compute/ComputeChildren.cs` (`EvictChild`), `src/rhino.compute/ReverseProxy.cs`
 (`/child-exiting`, retry loop), `src/compute.geometry/Shutdown.cs` (`NotifyParentExiting`)
 
@@ -101,10 +93,13 @@ A child that had self-exited on idle timeout stayed in the round-robin pool, so 
 routed to it failed with "connection refused" until a manual `/shutdown-children`. A child now
 POSTs `/child-exiting` just before it stops listening; the parent evicts that port; and the proxy
 evicts-and-retries on `HttpRequestError.ConnectionError`. The retry only fires when the connection
-was never established, so no solve is ever duplicated. Non-success child responses are logged with
-their body, so 500s from compute.geometry are diagnosable from the parent log.
+was never established, so no solve is ever duplicated. It wraps upstream's `AcquireChild` lease
+(each attempt takes and releases its own), and the request body, which upstream already reads in
+full before sending, is read once in the handler so every attempt re-sends the same bytes.
+Non-success child responses are logged with their body, so 500s from compute.geometry are
+diagnosable from the parent log.
 
-### 11. Solve-result cache purge frees native geometry (SELVA FIX)
+### 9. Solve-result cache purge frees native geometry (SELVA FIX)
 **File:** `src/compute.geometry/DataCache.cs` — `PurgeSolveResults`
 
 `resultsCache.Trim(100)` is best-effort (it may leave entries behind) and drops only the managed
@@ -112,7 +107,7 @@ reference. URL-data entries hold a `Tuple<JToken, object>` whose `Item2` may be 
 wrapping unmanaged C++ memory, so the purge did not actually relieve memory pressure. Now
 enumerates and removes every key explicitly and disposes any `IDisposable` payload.
 
-### 12. Linux Grasshopper plugin loading — diagnostics + quarantine (SELVA FIX)
+### 10. Linux Grasshopper plugin loading — diagnostics + quarantine (SELVA FIX)
 **File:** `src/compute.geometry/Startup.cs` (`#if LINUX` block)
 
 Two problems, both previously silent:
@@ -131,12 +126,7 @@ Note: external libraries are loaded by touching the `Instances.ComponentServer` 
 GH's own guarded once-only load. Do **not** call `LoadExternalFiles()` as well — that loads every
 assembly twice and floods the component server with object-ID conflicts.
 
-### 13. `System.Management` package reference
-**File:** `src/compute.geometry/compute.geometry.csproj`
-
-Added under the Windows-only `ItemGroup`.
-
-### 14. Live-event callback target as document constants (SELVA)
+### 11. Live-event callback target as document constants (SELVA)
 **Files:** `src/compute.geometry/IO/Schema.cs` (`SelvaEventTarget`, `Schema.SelvaEvents`),
 `src/compute.geometry/ResthopperEndpoints.cs` (`SelvaEventTargetFor`, the `DefineConstant` block
 next to `ComputeRecursionLevel`), `src/compute.geometry/Config.cs` (`EventSinkHosts`)
@@ -162,18 +152,19 @@ Two rules carry the safety:
   it. Only an API-key holder can send a solve request, so this is defence in depth against a
   leaked key becoming an SSRF hop.
 
-### 15. Warnings reported outside Debug (SELVA FIX)
+### 12. Warnings reported outside Debug (SELVA FIX)
 **File:** `src/compute.geometry/GrasshopperDefinition.cs` — `LogRuntimeMessages`
 
 Upstream only collects `GH_RuntimeMessageLevel.Warning` into the response's `warnings[]` when
 `Config.Debug` is on, so a production server never reports a warning at all. Selva shows
 warnings to the user and lets them decide whether to trust the result, which is meaningless if
-the array is always empty. Warnings are now collected unconditionally; the Serilog line for them
-stays behind `Debug` so production logs are not flooded. Remarks are unchanged (log only).
+the array is always empty. Outside Debug the warnings are added to the response ahead of
+upstream's block, which is left as it is (it adds them itself in Debug and logs them per
+`RHINO_COMPUTE_LOG_LEVEL`). Remarks are unchanged (log only).
 
-### 16. Solve outcome returned as a `selva` block (SELVA)
+### 13. Solve outcome returned as a `selva` block (SELVA)
 **Files:** `src/compute.geometry/IO/Schema.cs` (`Schema.Selva`),
-`src/compute.geometry/ResthopperEndpoints.cs` (`SelvaOutcome` next to the #14 constants),
+`src/compute.geometry/ResthopperEndpoints.cs` (`SelvaOutcome` next to the #11 constants),
 `src/compute.geometry/GrasshopperDefinition.cs` (`Solve`, `ReadSelvaOutcome`)
 
 Compute flattens runtime messages to strings, so Selva used to recover "a Message component
@@ -183,7 +174,7 @@ aborted solve or a remark at all. Now the Selva plugin writes its verdict,
 `SolutionEnd`, and compute returns it verbatim as `selva: { outcome }` in the solve response.
 Compute never interprets the messages; the plugin decides.
 
-- `SelvaOutcome` is defined empty on **every** request, like the #14 constants, so a cached
+- `SelvaOutcome` is defined empty on **every** request, like the #11 constants, so a cached
   document cannot return the previous solve's verdict.
 - When the outcome says `blocked` or `aborted`, `values` is returned empty and the
   "No outputs found" check is skipped: the client discards those outputs, and serializing them
@@ -191,6 +182,14 @@ Compute never interprets the messages; the plugin decides.
   unchanged, so a client that ignores `selva` still sees the markers.
 - No Selva plugin, an older one, or a definition without a Selva component: no constant is
   written, no `selva` block, behaviour as before.
+
+### 14. Solve responses carry a Content-Length (SELVA FIX)
+**File:** `src/compute.geometry/ResthopperEndpoints.cs` — end of `Grasshopper`
+
+Upstream writes the solve JSON with `WriteAsync`, so an answer that is not gzipped goes out
+chunked. The Node client fails to read a chunked 500 and hangs until its timeout. The body is
+encoded once and written with `ContentLength` set. With gzip (upstream's compression middleware)
+the middleware sets the length of what it sends instead.
 
 ---
 
@@ -204,13 +203,7 @@ Tooling and docs with no upstream counterpart:
 - `docs/quick-start-docker.md`, `docs/grasshopper-plugins-not-loading-linux.md`.
 - `COMPUTE8_DIFFERENCES.md` — a stale leftover from an older branch; not maintained.
 - `.gitattributes`, `.gitignore` additions — local conventions.
-- `src/compute.geometry/compute.geometry.csproj` — `<Version>` (currently 9.3.0).
-
-### Known cruft
-
-- `src/GrasshopperValidationHelpers.cs` — a 109-line duplicate of
-  `src/compute.geometry/GrasshopperValidationHelper.cs` (248 lines), sitting outside the project
-  directory so SDK globbing never compiles it. Dead file; safe to delete.
+- `src/compute.geometry/compute.geometry.csproj` — `<Version>`, bumped on every upstream merge.
 
 ---
 

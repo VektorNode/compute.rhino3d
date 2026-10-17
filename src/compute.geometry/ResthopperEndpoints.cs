@@ -19,9 +19,7 @@ using Rhino;
 
 namespace compute.geometry
 {
-    // ============================================================================
-    // VektorNode change
-    // ============================================================================
+    // VEKTORNODE: SELVA — stable error code for a stale pointer.
     // Distinguishes a stale-pointer cache miss (the client referenced a definition
     // by its server cache key, but the server no longer holds it — evicted, GC'd,
     // restarted, or a different child in the pool) from a genuine load failure
@@ -41,6 +39,18 @@ namespace compute.geometry
             app.MapPost("/grasshopper", Grasshopper);
             app.MapPost("/io", PostIoNames);
             app.MapGet("/io", GetIoNames);
+        }
+
+        static GrasshopperDefinition FromAlgo(string algo)
+        {
+            try
+            {
+                return GrasshopperDefinition.FromBase64String(algo, true);
+            }
+            catch (FormatException ex)
+            {
+                throw new BadRequestException($"The algo isn't valid base64: {ex.Message}", ex);
+            }
         }
 
         static void SetDefaultTolerances(double absoluteTolerance, double angleToleranceDegrees)
@@ -77,7 +87,22 @@ namespace compute.geometry
 
         static object ghSolveLock = new object();
 
-        // VEKTORNODE: detect whether a cached solve-result JSON came from an errored
+        // Rhino can't create or close documents on two threads at once, and nested Hops calls solve alongside other
+        // solves. The active document is the whole process's, so each solve closes only its own and hands it back.
+        static readonly object headlessDocLock = new object();
+
+        static void CloseHeadlessDoc(RhinoDoc doc, RhinoDoc previous)
+        {
+            lock (headlessDocLock)
+            {
+                if (RhinoDoc.ActiveDoc?.RuntimeSerialNumber == doc.RuntimeSerialNumber && previous != null
+                    && RhinoDoc.FromRuntimeSerialNumber(previous.RuntimeSerialNumber) != null)
+                    RhinoDoc.ActiveDoc = previous;
+                doc.Dispose();
+            }
+        }
+
+        // VEKTORNODE: CACHE-ERRORED-SOLVES — detect whether a cached solve-result JSON came from an errored
         // solve, so a cache hit can mirror the live path's 500 status. Parses only the
         // top-level "errors" array via a streaming reader — avoids deserializing the
         // (potentially multi-MB) geometry payload. Any parse trouble → treat as no
@@ -162,98 +187,104 @@ namespace compute.geometry
             GrasshopperDefinition definition = GrasshopperDefinition.FromUrl(input.Pointer, true);
             if (definition == null && !string.IsNullOrWhiteSpace(input.Algo))
             {
-                definition = GrasshopperDefinition.FromBase64String(input.Algo, true);
+                definition = FromAlgo(input.Algo);
             }
             if (definition == null)
             {
-                // VektorNode change: a pointer was supplied but didn't resolve, and
-                // there's no algo to fall back on → the client's cache key is stale.
-                // Throw a typed exception so the handler can signal a recoverable
-                // miss (client re-uploads) rather than a hard failure.
+                // VEKTORNODE: SELVA — a pointer that no longer resolves, with no algo to fall back
+                // on, is a stale client cache key: a typed miss lets the client re-upload.
                 if (!string.IsNullOrWhiteSpace(input.Pointer) && string.IsNullOrWhiteSpace(input.Algo))
                 {
                     Serilog.Log.Warning("Definition not cached for pointer {Pointer}", input.Pointer);
                     throw new DefinitionNotCachedException(input.Pointer);
                 }
-
-                var msg = "Unable to load grasshopper definition";
-                Serilog.Log.Warning(msg);
-                throw new Exception(msg);
+                throw new BadRequestException("Unable to load grasshopper definition");
             }
             SetDefaultTolerances(input.AbsoluteTolerance, input.AngleTolerance);
             SetDefaultUnits(input.ModelUnits);
 
-            // Instantiate headless doc
-            if (Config.CreateHeadlessDoc)
+            // The shared instance is what the solve cache keeps; the solve may run on a copy of it.
+            var shared = definition;
+            definition = shared.CheckOut();
+            RhinoDoc headlessDoc = null, previousDoc = null;
+            try
             {
-                Serilog.Log.Debug("Creating headless Rhino document");
-                RhinoDoc.ActiveDoc = RhinoDoc.CreateHeadless(null);
-                // VEKTORNODE: undo recording must stay off server-side. With an active
-                // doc, GH_Document.NewSolution calls RhinoDoc.BeginUndoRecord, which in
-                // headless Linux Rhino invokes a GC'd Command.UndoCallback delegate and
-                // kills the child process.
-                RhinoDoc.ActiveDoc.UndoRecordingEnabled = false;
-                RhinoDoc.ActiveDoc.ModelAbsoluteTolerance = input.AbsoluteTolerance;
-                RhinoDoc.ActiveDoc.ModelAngleToleranceDegrees = input.AngleTolerance;
-                if (Enum.TryParse(input.ModelUnits, out UnitSystem units))
+                // Instantiate headless doc
+                if (Config.CreateHeadlessDoc)
                 {
-                    RhinoDoc.ActiveDoc.ModelUnitSystem = units;
+                    Serilog.Log.Debug("Creating headless Rhino document");
+                    lock (headlessDocLock)
+                    {
+                        previousDoc = RhinoDoc.ActiveDoc;
+                        headlessDoc = RhinoDoc.CreateHeadless(null);
+                        RhinoDoc.ActiveDoc = headlessDoc;
+                    }
+                    // VEKTORNODE: SELVA FIX — undo recording must stay off server-side. With an active
+                    // doc, GH_Document.NewSolution calls RhinoDoc.BeginUndoRecord, which in headless
+                    // Linux Rhino invokes a GC'd Command.UndoCallback delegate and kills the child.
+                    headlessDoc.UndoRecordingEnabled = false;
+                    headlessDoc.ModelAbsoluteTolerance = input.AbsoluteTolerance;
+                    headlessDoc.ModelAngleToleranceDegrees = input.AngleTolerance;
+                    if (Enum.TryParse(input.ModelUnits, out UnitSystem units))
+                    {
+                        headlessDoc.ModelUnitSystem = units;
+                    }
+                    Serilog.Log.Debug($"Setting absolute tolerance: ({input.AbsoluteTolerance}), angle tolerance: ({input.AngleTolerance}), and units ({input.ModelUnits})");
                 }
-                Serilog.Log.Debug($"Setting absolute tolerance: ({input.AbsoluteTolerance}), angle tolerance: ({input.AngleTolerance}), and units ({input.ModelUnits})");
+                int recursionLevel = input.RecursionLevel + 1;
+                definition.Definition.DefineConstant("ComputeRecursionLevel", new Grasshopper.Kernel.Expressions.GH_Variant(recursionLevel));
+
+                // ── BEGIN VEKTORNODE: SELVA — live events ──
+                // Defined on EVERY request, empty when the block is absent or its host is not
+                // allowlisted: cached definitions are live GH_Documents reused across requests, and
+                // a constant left over from the previous solve would post that solve's events to
+                // another caller's callback.
+                var eventTarget = SelvaEventTargetFor(input);
+                definition.Definition.DefineConstant("SelvaEventUrl", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.Url ?? string.Empty));
+                definition.Definition.DefineConstant("SelvaSolveId", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.SolveId ?? string.Empty));
+                definition.Definition.DefineConstant("SelvaEventToken", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.Token ?? string.Empty));
+                // Empty for the same reason: the plugin writes the solve's verdict here, and a stale
+                // one would be returned as this solve's.
+                definition.Definition.DefineConstant("SelvaOutcome", new Grasshopper.Kernel.Expressions.GH_Variant(string.Empty));
+                // ── END   VEKTORNODE: SELVA — live events ──
+
+                definition.SetInputs(input);
+                long decodeTime = stopwatch.ElapsedMilliseconds;
+                stopwatch.Restart();
+                var fileNameMsg = String.Empty;
+                if (!String.IsNullOrEmpty(input.FileName))
+                    fileNameMsg = $" {input.FileName}";
+                Serilog.Log.Debug($"Solving definition{fileNameMsg}...");
+                var output = definition.Solve(input.DataVersion, input.DataFormat);
+                output.Pointer = definition.CacheKey;
+                long solveTime = stopwatch.ElapsedMilliseconds;
+                stopwatch.Restart();
+                string returnJson = JsonConvert.SerializeObject(output, GeometryResolver.Settings(input.DataVersion));
+                long encodeTime = stopwatch.ElapsedMilliseconds;
+                ctx.Response.Headers.Append("Server-Timing", $"decode;dur={decodeTime}, solve;dur={solveTime}, encode;dur={encodeTime}");
+                if (definition.HasErrors)
+                    ctx.Response.StatusCode = 500; // internal server error
+
+                // VEKTORNODE: CACHE-ERRORED-SOLVES — an errored solve is not cached unless the
+                // request opts in (definitions that raise GH errors by design but still produce
+                // correct geometry). The HTTP status is unchanged either way.
+                if (input.CacheSolve && (!definition.HasErrors || input.CacheErroredSolves))
+                {
+                    Serilog.Log.Debug(
+                        definition.HasErrors
+                            ? "Caching solve results (errored solve, CacheErroredSolves opt-in)"
+                            : "Caching solve results");
+                    DataCache.SetCachedSolveResults(body, returnJson, shared);
+                }
+
+                return returnJson;
             }
-            int recursionLevel = input.RecursionLevel + 1;
-            definition.Definition.DefineConstant("ComputeRecursionLevel", new Grasshopper.Kernel.Expressions.GH_Variant(recursionLevel));
-
-            // ── BEGIN VEKTORNODE: SELVA — live events ──
-            // Defined on EVERY request, empty when the block is absent or its host is not
-            // allowlisted: cached definitions are live GH_Documents reused across requests, and
-            // a constant left over from the previous solve would post that solve's events to
-            // another caller's callback.
-            var eventTarget = SelvaEventTargetFor(input);
-            definition.Definition.DefineConstant("SelvaEventUrl", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.Url ?? string.Empty));
-            definition.Definition.DefineConstant("SelvaSolveId", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.SolveId ?? string.Empty));
-            definition.Definition.DefineConstant("SelvaEventToken", new Grasshopper.Kernel.Expressions.GH_Variant(eventTarget.Token ?? string.Empty));
-            // Empty for the same reason: the plugin writes the solve's verdict here, and a stale
-            // one would be returned as this solve's.
-            definition.Definition.DefineConstant("SelvaOutcome", new Grasshopper.Kernel.Expressions.GH_Variant(string.Empty));
-            // ── END   VEKTORNODE: SELVA — live events ──
-
-            definition.SetInputs(input);
-            long decodeTime = stopwatch.ElapsedMilliseconds;
-            stopwatch.Restart();
-            var fileNameMsg = String.Empty;
-            if (!String.IsNullOrEmpty(input.FileName))
-                fileNameMsg = $" {input.FileName}";
-            Serilog.Log.Debug($"Solving definition{fileNameMsg}...");
-            var output = definition.Solve(input.DataVersion, input.DataFormat);
-            output.Pointer = definition.CacheKey;
-            long solveTime = stopwatch.ElapsedMilliseconds;
-            stopwatch.Restart();
-            string returnJson = JsonConvert.SerializeObject(output, GeometryResolver.Settings(input.DataVersion));
-            long encodeTime = stopwatch.ElapsedMilliseconds;
-            ctx.Response.Headers.Append("Server-Timing", $"decode;dur={decodeTime}, solve;dur={solveTime}, encode;dur={encodeTime}");
-            if (definition.HasErrors)
-                ctx.Response.StatusCode = 500; // internal server error
-
-            // Cache the completed solve when requested. An errored solve is normally
-            // NOT cached (an error usually means a bad result), but VEKTORNODE:
-            // CacheErroredSolves lets the author opt in for definitions that throw GH
-            // errors by design while still producing correct geometry. The HTTP status
-            // is unchanged either way — only the cache write is gated here.
-            if (input.CacheSolve && (!definition.HasErrors || input.CacheErroredSolves))
+            finally
             {
-                Serilog.Log.Debug(
-                    definition.HasErrors
-                        ? "Caching solve results (errored solve, CacheErroredSolves opt-in)"
-                        : "Caching solve results");
-                DataCache.SetCachedSolveResults(body, returnJson, definition);
+                if (headlessDoc != null)
+                    CloseHeadlessDoc(headlessDoc, previousDoc);
+                definition.CheckIn();
             }
-
-            // Dispose headless doc
-            if (RhinoDoc.ActiveDoc is object)
-                RhinoDoc.ActiveDoc.Dispose();
-
-            return returnJson;
         }
 
         static async Task Grasshopper(HttpContext ctx)
@@ -262,7 +293,17 @@ namespace compute.geometry
             var body = await new System.IO.StreamReader(ctx.Request.Body).ReadToEndAsync();
             if (body.StartsWith("[") && body.EndsWith("]"))
                 body = body.Substring(1, body.Length - 2);
-            Schema input = JsonConvert.DeserializeObject<Schema>(body);
+            Schema input;
+            try
+            {
+                input = JsonConvert.DeserializeObject<Schema>(body);
+            }
+            catch (JsonException ex)
+            {
+                throw new BadRequestException($"Malformed JSON received: {ex.Message}", ex);
+            }
+            if (input == null)
+                throw new BadRequestException("The request has no body.");
            
             if (input.CacheSolve)
             {
@@ -309,7 +350,7 @@ namespace compute.geometry
             if (!string.IsNullOrEmpty(json))
             {
                 ctx.Response.ContentType = "application/json";
-                // Send the body with a Content-Length header so the
+                // VEKTORNODE: SELVA FIX — send the body with a Content-Length header so the
                 // size is known up front. Without it, the response is sent in chunks, which
                 // the Node client fails to read on a 500 error, causing the request to hang
                 // until it times out.
@@ -321,7 +362,7 @@ namespace compute.geometry
 
         static async Task GetIoNames(HttpContext ctx)
         {
-            await GetIoNamesHelper(ctx, true);
+            await GetIoNamesHelper(ctx, false);
         }
         static async Task PostIoNames(HttpContext ctx)
         {
@@ -346,10 +387,17 @@ namespace compute.geometry
                 using (var streamReader = new System.IO.StreamReader(ctx.Request.Body))
                 using (var jsonReader = new Newtonsoft.Json.JsonTextReader(streamReader))
                 {
-                    var token = await Newtonsoft.Json.Linq.JToken.ReadFromAsync(jsonReader);
-                    if (token is Newtonsoft.Json.Linq.JArray ja && ja.Count > 0)
-                        token = ja[0];
-                    input = token.ToObject<Schema>();
+                    try
+                    {
+                        var token = await Newtonsoft.Json.Linq.JToken.ReadFromAsync(jsonReader);
+                        if (token is Newtonsoft.Json.Linq.JArray ja && ja.Count > 0)
+                            token = ja[0];
+                        input = token.ToObject<Schema>();
+                    }
+                    catch (JsonException ex)
+                    {
+                        throw new BadRequestException($"Malformed JSON received: {ex.Message}", ex);
+                    }
                 }
 
                 string httpType = ctx.Request.IsHttps ? "HTTPS" : "HTTP";
@@ -367,20 +415,23 @@ namespace compute.geometry
                 definition = GrasshopperDefinition.FromUrl(input.Pointer, true);
                 if (definition == null)
                 {
-                    definition = GrasshopperDefinition.FromBase64String(input.Algo, true);
+                    definition = FromAlgo(input.Algo);
                 }
             }
             else
             {
-                string url = ctx.Request.Query["Pointer"][0].ToString();
+                var pointer = ctx.Request.Query["Pointer"];
+                string url = pointer.Count > 0 ? pointer[0] : null;
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsync("GET /io needs a Pointer query parameter.");
+                    return;
+                }
                 definition = GrasshopperDefinition.FromUrl(url, true);
             }
             if (definition == null)
-            {
-                var msg = "Unable to load grasshopper definition";
-                Serilog.Log.Warning(msg);
-                throw new Exception(msg);
-            }
+                throw new BadRequestException("Unable to load grasshopper definition");
                 
             var responseSchema = definition.GetInputsAndOutputs();
 
@@ -403,14 +454,11 @@ namespace compute.geometry
             {
                 responseSchema.Errors.Add(error);
             }
-            foreach (var error in Logging.Errors)
+            foreach (var error in Logging.TakeErrors())
             {
                 responseSchema.Errors.Add(error);
             }
             string jsonResponse = JsonConvert.SerializeObject(responseSchema);
-
-            Logging.Warnings.Clear();
-            Logging.Errors.Clear();
 
             ctx.Response.ContentType = "application/json";
             await ctx.Response.WriteAsync(jsonResponse);

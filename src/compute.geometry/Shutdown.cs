@@ -124,6 +124,7 @@ namespace compute.geometry
                 var elapsedTime = DateTime.Now - startTime;
                 Serilog.Log.Information("Total elapsed time for child process is " + string.Format("{0:D2} days, {1:D2} hrs, {2:D2} mins, {3:D2} secs", elapsedTime.Days, elapsedTime.Hours, elapsedTime.Minutes, elapsedTime.Seconds));
 
+                // VEKTORNODE: SELVA FIX — dead-child eviction.
                 // Tell the parent we're leaving so it drops us from the round-robin pool now,
                 // rather than discovering the dead port on the next client request (which produced
                 // the post-idle "connection refused" bursts). Best-effort: if the parent is gone or
@@ -136,6 +137,7 @@ namespace compute.geometry
             }
         }
 
+        // VEKTORNODE: SELVA FIX — dead-child eviction.
         // Best-effort POST to the parent's /child-exiting endpoint with our own port so the parent
         // evicts us from the pool before we stop listening. Swallows all errors — this is a
         // courtesy notification and must never block or fail the shutdown.

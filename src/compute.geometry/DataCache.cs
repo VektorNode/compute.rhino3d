@@ -105,6 +105,14 @@ namespace compute.geometry
             return null;
         }
 
+        // Only a definition this process has already loaded; unlike GetCachedDefinition, never reads the cache directory.
+        public static GrasshopperDefinition GetLoadedDefinition(string key)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                return null;
+            return (definitionCache.Get(key) as CachedDefinition)?.Definition;
+        }
+
         public static GrasshopperDefinition GetCachedDefinition(string key)
         {
             if (string.IsNullOrWhiteSpace(key))
@@ -146,7 +154,9 @@ namespace compute.geometry
                 Definition = definition,
                 WatchedFileRuntimeSerialNumber = GrasshopperDefinition.WatchedFileRuntimeSerialNumber
             };
-            definitionCache.Set(key, cachedef, CachePolicy);
+            // Setting the cached instance again would retire it.
+            if (!ReferenceEquals((definitionCache.Get(key) as CachedDefinition)?.Definition, definition))
+                definitionCache.Set(key, cachedef, DefinitionPolicy);
 
             if (!string.IsNullOrWhiteSpace(data))
             {
@@ -262,6 +272,12 @@ namespace compute.geometry
             return null;
         }
 
+        // A definition replaced, removed after its file changed, or evicted is released, as nothing else would dispose it.
+        private static System.Runtime.Caching.CacheItemPolicy DefinitionPolicy => new System.Runtime.Caching.CacheItemPolicy
+        {
+            RemovedCallback = args => (args.CacheItem.Value as CachedDefinition)?.Definition?.Retire()
+        };
+
         private static System.Runtime.Caching.CacheItemPolicy CachePolicy
         {
             get
@@ -317,6 +333,7 @@ namespace compute.geometry
         /// </summary>
         public static long PurgeSolveResults()
         {
+            // VEKTORNODE: SELVA FIX — purge every entry and free its native geometry.
             // Snapshot keys first: removing during the cache's own enumeration is unsafe.
             var keys = new List<string>();
             foreach (var kvp in resultsCache)

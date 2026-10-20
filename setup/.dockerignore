@@ -1,0 +1,4 @@
+# The image needs only start.sh; this keeps .env secrets, plugins and Terraform
+# providers out of the build context.
+*
+!start.sh

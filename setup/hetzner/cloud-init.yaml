@@ -1,0 +1,33 @@
+#cloud-config
+# First boot only. No secrets here: user_data is readable from the server's
+# metadata service and is kept in Terraform state.
+
+users:
+  - name: deploy
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+disable_root: true
+ssh_pwauth: false
+
+package_update: true
+package_upgrade: true
+packages:
+  - git
+  - curl
+  - jq
+  - rsync
+  - unattended-upgrades
+
+# Docker's default json-file log never rotates; read when the daemon first starts.
+write_files:
+  - path: /etc/docker/daemon.json
+    content: |
+      { "log-driver": "json-file", "log-opts": { "max-size": "10m", "max-file": "5" } }
+
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker deploy
+  - systemctl enable --now docker

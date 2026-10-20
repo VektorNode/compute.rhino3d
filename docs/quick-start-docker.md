@@ -108,6 +108,7 @@ branch it warns, and `FRESH=1` forces a full no-cache rebuild.
 | `CPUS` / `CPUSET`   | Cap CPU time (`4`) or pin cores (`0-3`) — see [README](../setup/README.md#limiting-cpu-and-memory) |
 | `MEMORY`            | RAM cap (`8g`), swap off — always set it, see [README](../setup/README.md#always-set-memory) |
 | `CACHE_LIMIT_PERCENT` | Memory load (% of `MEMORY`) at which cached solve results are evicted (default `70`) |
+| `IDLE_SPAN`         | Seconds without a request before the children exit and stop core-hour billing (default `3600`) |
 | `RESTART`           | Docker restart policy (default `unless-stopped`)      |
 | `PLATFORM`          | Docker platform (default `linux/amd64`, also on Apple Silicon — arm64 Rhino packages lag months behind) |
 

@@ -301,6 +301,11 @@ else
     echo "  WARNING: $WARMUP_GH not found — children start cold."
 fi
 
+# Children exit after this many seconds without a request, which stops core-hour
+# billing; unset keeps Compute's own default of an hour.
+IDLE_ARGS=()
+[ -n "$RHINO_COMPUTE_IDLE_SPAN" ] && IDLE_ARGS=(--idlespan "$RHINO_COMPUTE_IDLE_SPAN")
+
 exec dotnet run \
     --project rhino.compute \
     --configuration Release \
@@ -308,4 +313,5 @@ exec dotnet run \
     -- \
     --urls http://0.0.0.0:6500 \
     --childcount "$CHILD_COUNT" \
-    --spawn-on-startup
+    --spawn-on-startup \
+    "${IDLE_ARGS[@]}"

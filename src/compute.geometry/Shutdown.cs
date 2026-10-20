@@ -60,6 +60,7 @@ namespace compute.geometry
 
         static System.Net.Http.HttpClient httpClient;
         static DateTime lastSpanCheck = DateTime.Now;
+        const int MaxSpanCheckSeconds = 30;
 
         private async static void TimerTask(object timerState)
         {
@@ -79,9 +80,11 @@ namespace compute.geometry
             {
                 // Don't check the server every timer tick. Just check when we start approaching
                 // what we think is our span limit.
+                // VEKTORNODE: SELVA FIX — and at least every MaxSpanCheckSeconds: with one check per
+                // span a child can outlive the span by up to a whole span, and that time is billed.
                 var shouldCheckSpan = DateTime.Now - lastSpanCheck;
                 //Serilog.Log.Debug($"Idle span value is {idleSpan}. Elapsed time {shouldCheckSpan.TotalSeconds} seconds. Last span check {lastSpanCheck.ToLocalTime()}.");
-                if (shouldCheckSpan.TotalSeconds > idleSpan)
+                if (shouldCheckSpan.TotalSeconds > Math.Min(idleSpan, MaxSpanCheckSeconds))
                 {
                     if (httpClient == null)
                         httpClient = new System.Net.Http.HttpClient();

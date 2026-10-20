@@ -165,6 +165,12 @@ The [one source per plugin](#one-source-per-plugin) rule applies there too.
 `RHINO_COMPUTE_KEY` on both sides. Then point the app's Compute URL at
 `http://<server>:6500`.
 
+**Idle shutdown.** Set `IDLE_SPAN` (seconds) so the children exit when nobody
+solves and core-hour billing stops; the next solve starts them again.
+
+To provision such a server on Hetzner Cloud and deploy to it from your machine,
+see [hetzner/README.md](hetzner/README.md).
+
 ## Checking Status
 
 `docker start` / `docker restart` print almost nothing — the container can

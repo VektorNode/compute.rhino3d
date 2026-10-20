@@ -28,6 +28,9 @@
 #                       --memory-swap to the same value, so the container cannot swap.
 #   CACHE_LIMIT_PERCENT - Memory load (% of MEMORY) at which each child evicts
 #                       its solve-result cache. Compute's own default is 70.
+#   IDLE_SPAN         - Seconds without a request before the compute.geometry
+#                       children exit and stop core-hour billing (Compute's own
+#                       default: 3600). The next solve respawns them.
 #   RESTART           - Docker restart policy (default: unless-stopped)
 #
 # Rhino.Compute has no core limit of its own: --childcount only sets how many
@@ -55,7 +58,7 @@ function Fail([string]$m) { Write-Host ""; Write-Host "ERROR: $m" -ForegroundCol
 # -------------------------------------------------------
 $Vars = @('RHINO_TOKEN','RHINO_COMPUTE_KEY','IMAGE_NAME','CONTAINER_NAME','PORT',
           'CHILD_COUNT','REPO_URL','BRANCH','NO_BUILD','FRESH','LOCAL_PLUGINS','PLATFORM',
-          'CPUS','CPUSET','MEMORY','CACHE_LIMIT_PERCENT','RESTART')
+          'CPUS','CPUSET','MEMORY','CACHE_LIMIT_PERCENT','IDLE_SPAN','RESTART')
 
 $EnvFile = Join-Path $ScriptDir '.env'
 if (Test-Path $EnvFile) {
@@ -89,6 +92,7 @@ $Cpus          = EnvOr 'CPUS'           ''
 $CpuSet        = EnvOr 'CPUSET'         ''
 $MemoryLimit   = EnvOr 'MEMORY'         ''
 $CacheLimit    = EnvOr 'CACHE_LIMIT_PERCENT' ''
+$IdleSpan      = EnvOr 'IDLE_SPAN'      ''
 $Restart       = EnvOr 'RESTART'        'unless-stopped'
 
 Write-Host ""
@@ -105,6 +109,7 @@ elseif ($Cpus)   { Write-Host "  CPU limit  : $Cpus CPUs" }
 else             { Write-Host "  CPU limit  : none (all host cores)" }
 if ($MemoryLimit) { Write-Host "  Memory     : $MemoryLimit (no swap)" }
 if ($CacheLimit)  { Write-Host "  Cache evict: at $CacheLimit% memory load" }
+if ($IdleSpan)    { Write-Host "  Idle span  : ${IdleSpan}s" }
 Write-Host "  Restart    : $Restart"
 Write-Host "  Platform   : $Platform"
 Write-Host "============================================================"
@@ -298,6 +303,7 @@ $runArgs = @('run', '-d', '--platform', $Platform, '--name', $ContainerName,
              '-e', "RHINO_COMPUTE_CHILD_COUNT=$ChildCount")
 if ($ComputeKey) { $runArgs += @('-e', "RHINO_COMPUTE_KEY=$ComputeKey") }
 if ($CacheLimit) { $runArgs += @('-e', "RHINO_COMPUTE_CACHE_PHYSICAL_LIMIT_PERCENT=$CacheLimit") }
+if ($IdleSpan)   { $runArgs += @('-e', "RHINO_COMPUTE_IDLE_SPAN=$IdleSpan") }
 $runArgs += $limitArgs
 $runArgs += $mounts
 $runArgs += $ImageName

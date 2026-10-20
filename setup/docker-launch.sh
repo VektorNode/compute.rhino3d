@@ -28,6 +28,9 @@
 #                   --memory-swap to the same value, so the container cannot swap.
 #   CACHE_LIMIT_PERCENT - Memory load (% of MEMORY) at which each child evicts
 #                   its solve-result cache. Compute's own default is 70.
+#   IDLE_SPAN     - Seconds without a request before the compute.geometry
+#                   children exit and stop core-hour billing (Compute's own
+#                   default: 3600). The next solve respawns them.
 #   RESTART       - Docker restart policy (default: unless-stopped).
 #
 # Rhino.Compute has no core limit of its own: --childcount only sets how many
@@ -49,7 +52,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Load setup/.env if present (RHINO_TOKEN=... etc). Env vars already set in
 # the shell win — .env only fills in what isn't already set.
 if [ -f "$SCRIPT_DIR/.env" ]; then
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT RESTART; do
+    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT IDLE_SPAN RESTART; do
         eval "_prior_${var}=\"\${${var}-}\""
     done
 
@@ -58,7 +61,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
     set +a
 
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT RESTART; do
+    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT IDLE_SPAN RESTART; do
         eval "if [ -n \"\${_prior_${var}-}\" ]; then ${var}=\"\${_prior_${var}}\"; fi"
     done
 fi
@@ -137,6 +140,7 @@ echo "  Children   : $CHILD_COUNT"
 echo "  CPU limit  : $([ -n "$CPUSET" ] && echo "cores $CPUSET (pinned)" || { [ -n "$CPUS" ] && echo "$CPUS CPUs" || echo "none (all host cores)"; })"
 [ -n "$MEMORY" ] && echo "  Memory     : $MEMORY (no swap)"
 [ -n "$CACHE_LIMIT_PERCENT" ] && echo "  Cache evict: at ${CACHE_LIMIT_PERCENT}% memory load"
+[ -n "$IDLE_SPAN" ] && echo "  Idle span  : ${IDLE_SPAN}s"
 echo "  Restart    : $RESTART"
 echo "  Token      : $([ -n "$RHINO_TOKEN" ] && echo "set" || echo "NOT SET (computations will fail)")"
 echo "============================================================"
@@ -306,6 +310,7 @@ fi
 ENV_ARGS=()
 [ -n "$RHINO_COMPUTE_KEY" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_KEY=$RHINO_COMPUTE_KEY")
 [ -n "$CACHE_LIMIT_PERCENT" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_CACHE_PHYSICAL_LIMIT_PERCENT=$CACHE_LIMIT_PERCENT")
+[ -n "$IDLE_SPAN" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_IDLE_SPAN=$IDLE_SPAN")
 
 # --init puts tini at PID 1 to reap orphaned processes and forward signals; without
 # it a zombie left behind by a crashed child can make `docker restart` fail.

@@ -55,7 +55,7 @@ BRANCH="${BRANCH:-$(sed -n 's/^ARG BRANCH=//p' "$SCRIPT_DIR/Dockerfile")}"
 
 [ -n "$DEPLOY_HOST" ] || die "DEPLOY_HOST is not set in setup/.env.server."
 
-ssh_() { ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$DEPLOY_HOST" "$@"; }
+ssh_() { ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "$DEPLOY_HOST" "$@"; }
 
 case "${1:-deploy}" in
     status) ssh_ "cd $DEPLOY_DIR/setup && ./docker-status.sh"; exit ;;
@@ -139,11 +139,14 @@ printf '%s' "$manifest" > "$STAGE/DEPLOYED"
 # Server checkout + files
 # -------------------------------------------------------
 log "Preparing $DEPLOY_HOST"
-# A fresh server can take a few minutes to accept logins.
+# A fresh server can take a few minutes to accept logins, and refuses the key
+# until its first boot has installed it, so only an unknown host fails at once.
 for i in $(seq 1 30); do
-    ssh_ true 2>/dev/null && break
-    [ "$i" = 30 ] && die "cannot log in to $DEPLOY_HOST over SSH."
-    [ "$i" = 1 ] && echo "    waiting for SSH ..."
+    err="$(ssh_ true 2>&1)" && break
+    err="$(echo "$err" | tail -1)"
+    case "$err" in *"Could not resolve hostname"*) die "$err (is DEPLOY_HOST an alias missing from ~/.ssh/config?)" ;; esac
+    [ "$i" = 30 ] && die "cannot log in to $DEPLOY_HOST: $err"
+    echo "    waiting for SSH: $err"
     sleep 10
 done
 if ! ssh_ "docker info >/dev/null 2>&1"; then

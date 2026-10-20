@@ -193,6 +193,16 @@ by `setup/.env.server` (template [.env.server.example](.env.server.example)). It
 | A plugin                                 | rebuild it, then `./deploy-server.sh` |
 | `packages.json` or `.env.server`         | `./deploy-server.sh`                  |
 
+### HTTPS
+
+The `RhinoComputeKey` is the only thing between the internet and your Rhino bill, and
+plain HTTP sends it in clear text with every request. To reach the server from
+anywhere, set `DEPLOY_TLS_DOMAIN` in `.env.server` to a name that resolves to the
+server, open ports 80 and 443 to the internet, and deploy: a Caddy container then
+serves `https://<name>` with a Let's Encrypt certificate and forwards to Compute on
+the same machine, so port 6500 can stay closed. Without a DNS name of your own, a
+wildcard-DNS service such as `<ip-with-dashes>.sslip.io` resolves to the server.
+
 ### Idle shutdown and billing
 
 Rhino bills per core while a `compute.geometry` child runs. `IDLE_SPAN` makes the

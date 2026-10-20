@@ -20,6 +20,9 @@
 #   DEPLOY_DIR     - checkout on the server, relative to its home (default: compute.rhino3d)
 #   DEPLOY_PLUGINS - comma-separated local plugin build folders to ship
 #                    (default: LOCAL_PLUGINS from setup/.env)
+#   DEPLOY_TLS_DOMAIN - serve https://<this name> through Caddy with a Let's Encrypt
+#                    certificate. The name must resolve to the server and ports 80
+#                    and 443 must be open to the internet. Unset removes the proxy.
 #   Every other line becomes the server's setup/.env (RHINO_TOKEN, IDLE_SPAN, ...).
 #
 # YES=1 skips the question asked when a plugin comes from a dirty tree or a
@@ -47,7 +50,10 @@ DEPLOY_HOST="$(env_value "$SERVER_ENV" DEPLOY_HOST)"
 DEPLOY_DIR="$(env_value "$SERVER_ENV" DEPLOY_DIR)"; DEPLOY_DIR="${DEPLOY_DIR:-compute.rhino3d}"
 DEPLOY_PLUGINS="$(env_value "$SERVER_ENV" DEPLOY_PLUGINS)"
 [ -n "$DEPLOY_PLUGINS" ] || DEPLOY_PLUGINS="$(env_value "$SCRIPT_DIR/.env" LOCAL_PLUGINS)"
+DEPLOY_TLS_DOMAIN="$(env_value "$SERVER_ENV" DEPLOY_TLS_DOMAIN)"
 CONTAINER_NAME="$(env_value "$SERVER_ENV" CONTAINER_NAME)"; CONTAINER_NAME="${CONTAINER_NAME:-rhino-compute-x9}"
+PORT="$(env_value "$SERVER_ENV" PORT)"; PORT="${PORT:-6500}"
+TLS_CONTAINER=rhino-compute-tls
 REPO_URL="$(env_value "$SERVER_ENV" REPO_URL)"
 REPO_URL="${REPO_URL:-$(sed -n 's/^ARG REPO_URL=//p' "$SCRIPT_DIR/Dockerfile")}"
 BRANCH="$(env_value "$SERVER_ENV" BRANCH)"
@@ -197,11 +203,38 @@ ssh_ "cd $DEPLOY_DIR/setup && set -a && . ./.env && set +a
     exit 1" || die "no healthy answer after 5 minutes. ./deploy-server.sh logs"
 ok "healthcheck answers"
 ssh_ "cd $DEPLOY_DIR/setup && ./docker-status.sh"
+
+# -------------------------------------------------------
+# HTTPS, so the RhinoComputeKey never crosses a network in clear text. The
+# certificate lives in a volume and survives redeploys, which keeps Let's
+# Encrypt's rate limits out of reach.
+# -------------------------------------------------------
+if [ -n "$DEPLOY_TLS_DOMAIN" ]; then
+    log "HTTPS for $DEPLOY_TLS_DOMAIN"
+    ssh_ "set -e
+        docker pull -q caddy:2 >/dev/null
+        docker rm -f $TLS_CONTAINER >/dev/null 2>&1 || true
+        docker run -d --name $TLS_CONTAINER --restart unless-stopped --network host \
+            -v rhino-compute-tls:/data caddy:2 \
+            caddy reverse-proxy --from $DEPLOY_TLS_DOMAIN --to localhost:$PORT >/dev/null"
+    key="$(env_value "$SERVER_ENV" RHINO_COMPUTE_KEY)"
+    hdr=(); [ -n "$key" ] && hdr=(-H "RhinoComputeKey: $key")
+    for i in $(seq 1 24); do
+        code="$(curl -s -o /dev/null -w '%{http_code}' -m 10 "${hdr[@]}" "https://$DEPLOY_TLS_DOMAIN/healthcheck" || true)"
+        [ "$code" = 200 ] && break
+        [ "$i" = 24 ] && die "https://$DEPLOY_TLS_DOMAIN/healthcheck did not answer (last: $code). Does the name resolve to the server, with ports 80 and 443 open? Logs: docker logs $TLS_CONTAINER"
+        sleep 5
+    done
+    ok "https://$DEPLOY_TLS_DOMAIN answers"
+else
+    ssh_ "docker rm -f $TLS_CONTAINER >/dev/null 2>&1 || true"
+fi
 ssh_ "docker image prune -f >/dev/null"
 
 echo ""
 echo "============================================================"
 echo "  Deployed. Running: compute ${remote_head:0:7}, plugins:"
 for name in "${plugin_names[@]}"; do echo "    $name"; done
+[ -n "$DEPLOY_TLS_DOMAIN" ] && echo "  Clients use: https://$DEPLOY_TLS_DOMAIN"
 echo "  Record on the server: ~/plugins/DEPLOYED"
 echo "============================================================"

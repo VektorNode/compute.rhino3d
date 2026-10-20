@@ -191,15 +191,23 @@ chunked. The Node client fails to read a chunked 500 and hangs until its timeout
 encoded once and written with `ContentLength` set. With gzip (upstream's compression middleware)
 the middleware sets the length of what it sends instead.
 
+### 15. Idle shutdown on time (SELVA FIX)
+**File:** `src/compute.geometry/Shutdown.cs` — `TimerTask`
+
+Upstream asks the parent for its idle time once per `idlespan`, so a child outlives the span by
+up to a whole span, and core-hour billing runs for all of it: a 5-minute span billed 5–10. The
+child now asks at least every `MaxSpanCheckSeconds` (30), so it exits within 30 s of the span.
+
 ---
 
 ## Non-source divergence
 
 Tooling and docs with no upstream counterpart:
 
-- `setup/` — Docker/Linux deployment: `Dockerfile`, `docker-launch.{ps1,sh}`, `docker-status.sh`,
-  `start.sh`, Multipass launchers and guides, `infrastructure/` (Terraform), `testing/`
-  (startup-timing and comparison scripts), `plugins/`, `.env.example`, `packages.example.json`.
+- `setup/` — Docker/Linux deployment: `Dockerfile`, `.dockerignore`, `docker-launch.{ps1,sh}`,
+  `docker-status.sh`, `start.sh`, `deploy-server.sh` with `.env.server.example`,
+  `server-init.sh`, Multipass launchers and guides, `testing/` (startup-timing and comparison
+  scripts), `plugins/`, `.env.example`, `packages.example.json`.
 - `docs/quick-start-docker.md`, `docs/grasshopper-plugins-not-loading-linux.md`.
 - `COMPUTE8_DIFFERENCES.md` — a stale leftover from an older branch; not maintained.
 - `.gitattributes`, `.gitignore` additions — local conventions.

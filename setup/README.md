@@ -165,11 +165,44 @@ The [one source per plugin](#one-source-per-plugin) rule applies there too.
 `RHINO_COMPUTE_KEY` on both sides. Then point the app's Compute URL at
 `http://<server>:6500`.
 
-**Idle shutdown.** Set `IDLE_SPAN` (seconds) so the children exit when nobody
-solves and core-hour billing stops; the next solve starts them again.
+## Deploying to a server
 
-To provision such a server on Hetzner Cloud and deploy to it from your machine,
-see [hetzner/README.md](hetzner/README.md).
+`./deploy-server.sh` deploys from your machine to any Ubuntu or Debian host you can
+reach over SSH as a user with passwordless sudo, x86-64 for current Rhino builds. How
+the host is created is up to you; it needs nothing installed. The script is configured
+by `setup/.env.server` (template [.env.server.example](.env.server.example)). It:
+
+1. Refuses to run unless `setup/` and `src/` are committed and the branch is pushed:
+   the server builds the image from GitHub.
+2. Lists each plugin with the repo, branch and commit its folder belongs to, and asks
+   before shipping one from a dirty tree or a branch other than its repo's default.
+3. Runs [server-init.sh](server-init.sh) with sudo when Docker is missing: Docker with
+   log rotation, plus git, rsync, curl and jq. It also works as a cloud's first-boot script.
+4. Syncs the plugin builds (`LOCAL_PLUGINS` from `setup/.env` unless `DEPLOY_PLUGINS`
+   is set), `packages.json`, `setup/plugins/` and `setup/fonts/`, and writes the
+   server's `setup/.env` from `.env.server`.
+5. Runs `docker-launch.sh` on the server, waits for `/healthcheck`, and prints
+   `docker-status.sh`. A failed image build leaves the running container alone.
+
+`~/plugins/DEPLOYED` on the server records what the last deploy shipped, and
+`./deploy-server.sh status`, `logs` and `ssh` look at the running server.
+
+| You changed                              | Run                                   |
+| ---------------------------------------- | ------------------------------------- |
+| Compute source, `start.sh`, `Dockerfile` | push, then `./deploy-server.sh`       |
+| A plugin                                 | rebuild it, then `./deploy-server.sh` |
+| `packages.json` or `.env.server`         | `./deploy-server.sh`                  |
+
+### Idle shutdown and billing
+
+Rhino bills per core while a `compute.geometry` child runs. `IDLE_SPAN` makes the
+children exit that many seconds after the last request, and the next solve starts
+them again; the machine itself is billed by its host whether busy or not.
+
+Every request a child answers resets that clock: `/healthcheck`, `/version` and
+`/plugins/...` as well as solves. A monitor that probes one of them keeps Rhino
+billing around the clock. Probe `/activechildren?initialize=false` instead, which
+the parent answers without waking a child.
 
 ## Checking Status
 

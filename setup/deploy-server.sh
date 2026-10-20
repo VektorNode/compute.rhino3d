@@ -11,6 +11,10 @@
 #   ./deploy-server.sh logs       # follow the container log
 #   ./deploy-server.sh ssh        # shell on the server
 #
+# The server: any Ubuntu or Debian host you can reach over SSH as a user with
+# sudo (x86-64 for current Rhino builds). The first deploy runs server-init.sh
+# there to install Docker.
+#
 # setup/.env.server (gitignored; template .env.server.example):
 #   DEPLOY_HOST    - ssh destination, e.g. deploy@203.0.113.10
 #   DEPLOY_DIR     - checkout on the server, relative to its home (default: compute.rhino3d)
@@ -19,7 +23,7 @@
 #   Every other line becomes the server's setup/.env (RHINO_TOKEN, IDLE_SPAN, ...).
 #
 # YES=1 skips the question asked when a plugin comes from a dirty tree or a
-# branch other than main.
+# branch other than its repo's default.
 # ============================================================
 
 set -eo pipefail
@@ -113,7 +117,8 @@ for p in "${_plugin_dirs[@]}"; do
         if [ -n "$(git -C "$p" status --porcelain --untracked-files=no)" ]; then
             state="$state, uncommitted changes"; suspect=1
         fi
-        case "$branch" in main|master) ;; *) suspect=1 ;; esac
+        default="$(git -C "$p" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+        case "$branch" in "${default:-main}"|"${default:-master}") ;; *) suspect=1 ;; esac
     else
         state="not in a git repo"
     fi
@@ -125,7 +130,7 @@ done
 [ ${#plugin_names[@]} -gt 0 ] || echo "    (none — set DEPLOY_PLUGINS or LOCAL_PLUGINS)"
 echo "    A build folder holds whatever was last built there; rebuild from the commit shown before deploying."
 if [ "$suspect" = "1" ] && [ "$YES" != "1" ]; then
-    read -r -p "    A plugin is not from a clean main. Deploy anyway? [y/N] " answer
+    read -r -p "    A plugin is not from a clean default branch. Deploy anyway? [y/N] " answer
     [ "$answer" = "y" ] || [ "$answer" = "Y" ] || die "aborted."
 fi
 printf '%s' "$manifest" > "$STAGE/DEPLOYED"
@@ -134,8 +139,20 @@ printf '%s' "$manifest" > "$STAGE/DEPLOYED"
 # Server checkout + files
 # -------------------------------------------------------
 log "Preparing $DEPLOY_HOST"
-ssh_ "cloud-init status --wait >/dev/null 2>&1 || true; command -v docker >/dev/null" \
-    || die "docker is not installed on the server (cloud-init failed? see /var/log/cloud-init-output.log)."
+# A fresh server can take a few minutes to accept logins.
+for i in $(seq 1 30); do
+    ssh_ true 2>/dev/null && break
+    [ "$i" = 30 ] && die "cannot log in to $DEPLOY_HOST over SSH."
+    [ "$i" = 1 ] && echo "    waiting for SSH ..."
+    sleep 10
+done
+if ! ssh_ "docker info >/dev/null 2>&1"; then
+    echo "    Docker is not usable there; running server-init.sh with sudo"
+    ssh_ "sudo -n bash -s" < "$SCRIPT_DIR/server-init.sh" \
+        || die "server-init.sh failed on $DEPLOY_HOST (the SSH user needs passwordless sudo)."
+    # A new login picks up the docker group server-init.sh granted.
+    ssh_ "docker info >/dev/null 2>&1" || die "Docker is still not usable by $DEPLOY_HOST after server-init.sh."
+fi
 ssh_ "set -e
     [ -d $DEPLOY_DIR/.git ] || git clone -q $REPO_URL $DEPLOY_DIR
     cd $DEPLOY_DIR

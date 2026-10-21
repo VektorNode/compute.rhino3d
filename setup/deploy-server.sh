@@ -22,7 +22,10 @@
 #                    (default: LOCAL_PLUGINS from setup/.env)
 #   DEPLOY_TLS_DOMAIN - serve https://<this name> through Caddy with a Let's Encrypt
 #                    certificate. The name must resolve to the server and ports 80
-#                    and 443 must be open to the internet. Unset removes the proxy.
+#                    and 443 must be open to the internet. Compute then listens on
+#                    localhost only. Unset removes the proxy.
+#   DEPLOY_ALLOW_IPS - with DEPLOY_TLS_DOMAIN: comma-separated addresses or CIDR
+#                    ranges allowed through the proxy; everyone else gets 403.
 #   Every other line becomes the server's setup/.env (RHINO_TOKEN, IDLE_SPAN, ...).
 #
 # YES=1 skips the question asked when a plugin comes from a dirty tree or a
@@ -51,6 +54,7 @@ DEPLOY_DIR="$(env_value "$SERVER_ENV" DEPLOY_DIR)"; DEPLOY_DIR="${DEPLOY_DIR:-co
 DEPLOY_PLUGINS="$(env_value "$SERVER_ENV" DEPLOY_PLUGINS)"
 [ -n "$DEPLOY_PLUGINS" ] || DEPLOY_PLUGINS="$(env_value "$SCRIPT_DIR/.env" LOCAL_PLUGINS)"
 DEPLOY_TLS_DOMAIN="$(env_value "$SERVER_ENV" DEPLOY_TLS_DOMAIN)"
+DEPLOY_ALLOW_IPS="$(env_value "$SERVER_ENV" DEPLOY_ALLOW_IPS)"
 CONTAINER_NAME="$(env_value "$SERVER_ENV" CONTAINER_NAME)"; CONTAINER_NAME="${CONTAINER_NAME:-rhino-compute-x9}"
 PORT="$(env_value "$SERVER_ENV" PORT)"; PORT="${PORT:-6500}"
 TLS_CONTAINER=rhino-compute-tls
@@ -155,10 +159,15 @@ for i in $(seq 1 30); do
     echo "    waiting for SSH: $err"
     sleep 10
 done
-if ! ssh_ "docker info >/dev/null 2>&1"; then
-    echo "    Docker is not usable there; running server-init.sh with sudo"
+# server-init.sh runs again whenever it changed since it last ran there, so existing
+# servers pick up new host settings.
+init_sum="$(cksum < "$SCRIPT_DIR/server-init.sh" | cut -d' ' -f1)"
+if [ "$(ssh_ 'cat /var/lib/rhino-compute-init 2>/dev/null' || true)" != "$init_sum" ] \
+        || ! ssh_ "docker info >/dev/null 2>&1"; then
+    echo "    running server-init.sh with sudo"
     ssh_ "sudo -n bash -s" < "$SCRIPT_DIR/server-init.sh" \
         || die "server-init.sh failed on $DEPLOY_HOST (the SSH user needs passwordless sudo)."
+    ssh_ "echo $init_sum | sudo -n tee /var/lib/rhino-compute-init >/dev/null"
     # A new login picks up the docker group server-init.sh granted.
     ssh_ "docker info >/dev/null 2>&1" || die "Docker is still not usable by $DEPLOY_HOST after server-init.sh."
 fi
@@ -183,6 +192,8 @@ for name in "${plugin_names[@]}"; do server_plugins+="$server_home/plugins/$name
 {
     grep -vE '^[[:space:]]*(DEPLOY_[A-Z_]*|LOCAL_PLUGINS)=' "$SERVER_ENV" || true
     echo "LOCAL_PLUGINS=${server_plugins%,}"
+    # Behind the proxy, plain HTTP on PORT must not reach the internet.
+    [ -n "$DEPLOY_TLS_DOMAIN" ] && echo "BIND=127.0.0.1"
 } | ssh_ "umask 077; cat > $DEPLOY_DIR/setup/.env"
 ok "setup/.env written"
 
@@ -211,17 +222,40 @@ ssh_ "cd $DEPLOY_DIR/setup && ./docker-status.sh"
 # -------------------------------------------------------
 if [ -n "$DEPLOY_TLS_DOMAIN" ]; then
     log "HTTPS for $DEPLOY_TLS_DOMAIN"
+    allow=""
+    if [ -n "$DEPLOY_ALLOW_IPS" ]; then
+        allow="	@blocked not remote_ip ${DEPLOY_ALLOW_IPS//,/ }
+	respond @blocked 403"
+    fi
+    # The admin API is off: on the host network any local process could reconfigure it.
+    cat <<EOF | ssh_ "mkdir -p caddy && cat > caddy/Caddyfile"
+{
+	admin off
+}
+$DEPLOY_TLS_DOMAIN {
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+$allow
+	reverse_proxy localhost:$PORT
+}
+EOF
     ssh_ "set -e
         docker pull -q caddy:2 >/dev/null
         docker rm -f $TLS_CONTAINER >/dev/null 2>&1 || true
         docker run -d --name $TLS_CONTAINER --restart unless-stopped --network host \
-            -v rhino-compute-tls:/data caddy:2 \
-            caddy reverse-proxy --from $DEPLOY_TLS_DOMAIN --to localhost:$PORT >/dev/null"
+            -v rhino-compute-tls:/data -v \$HOME/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
+            caddy:2 >/dev/null"
     key="$(env_value "$SERVER_ENV" RHINO_COMPUTE_KEY)"
     hdr=(); [ -n "$key" ] && hdr=(-H "RhinoComputeKey: $key")
     for i in $(seq 1 24); do
         code="$(curl -s -o /dev/null -w '%{http_code}' -m 10 "${hdr[@]}" "https://$DEPLOY_TLS_DOMAIN/healthcheck" || true)"
         [ "$code" = 200 ] && break
+        if [ "$code" = 403 ] && [ -n "$DEPLOY_ALLOW_IPS" ]; then
+            echo "    403 from here: this machine is not in DEPLOY_ALLOW_IPS"
+            break
+        fi
         [ "$i" = 24 ] && die "https://$DEPLOY_TLS_DOMAIN/healthcheck did not answer (last: $code). Does the name resolve to the server, with ports 80 and 443 open? Logs: docker logs $TLS_CONTAINER"
         sleep 5
     done

@@ -2,8 +2,9 @@
 # ============================================================
 # server-init.sh  (on the server, as root)
 # Prepares an Ubuntu or Debian host for Rhino.Compute: Docker with log
-# rotation, plus git, rsync, curl and jq. deploy-server.sh runs it with sudo
-# when Docker is missing; it also works as a cloud's first-boot script.
+# rotation, git, rsync, curl and jq, automatic security updates and key-only
+# SSH. deploy-server.sh runs it with sudo whenever this file changed since it
+# last ran there; it also works as a cloud's first-boot script.
 # Safe to run again.
 #
 # Usage:
@@ -24,7 +25,25 @@ while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1;
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -y -q git rsync curl jq
+apt-get install -y -q git rsync curl jq unattended-upgrades
+
+# OS security updates install themselves daily.
+printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' \
+    > /etc/apt/apt.conf.d/20auto-upgrades
+
+# Key-only SSH: deploy-server.sh logs in with a key anyway, and password logins are
+# what bots brute-force. 00- sorts before cloud images' own drop-ins; sshd keeps the
+# first value it reads.
+if [ -d /etc/ssh/sshd_config.d ]; then
+    printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' \
+        > /etc/ssh/sshd_config.d/00-rhino-compute.conf
+    if sshd -t; then
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd
+    else
+        rm /etc/ssh/sshd_config.d/00-rhino-compute.conf
+        echo "WARNING: sshd rejected the key-only settings; left SSH as it was." >&2
+    fi
+fi
 
 if ! command -v docker >/dev/null; then
     mkdir -p /etc/docker

@@ -13,6 +13,9 @@
 #   IMAGE_NAME    - Docker image tag (default: rhino-compute-x9)
 #   CONTAINER_NAME- Container name (default: rhino-compute-x9)
 #   PORT          - Host port to bind (default: 6500)
+#   BIND          - Host address to publish PORT on (default: all interfaces).
+#                   127.0.0.1 leaves Compute reachable only through a proxy on
+#                   the same host; Docker's published ports bypass ufw.
 #   CHILD_COUNT   - Number of compute.geometry children (default: 1)
 #   REPO_URL      - Repo to clone inside the image (default: Dockerfile's ARG default)
 #   BRANCH        - Branch to check out inside the image (default: Dockerfile's ARG default)
@@ -52,7 +55,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Load setup/.env if present (RHINO_TOKEN=... etc). Env vars already set in
 # the shell win — .env only fills in what isn't already set.
 if [ -f "$SCRIPT_DIR/.env" ]; then
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT IDLE_SPAN RESTART; do
+    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT IDLE_SPAN RESTART BIND; do
         eval "_prior_${var}=\"\${${var}-}\""
     done
 
@@ -61,7 +64,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
     set +a
 
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT IDLE_SPAN RESTART; do
+    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT IDLE_SPAN RESTART BIND; do
         eval "if [ -n \"\${_prior_${var}-}\" ]; then ${var}=\"\${_prior_${var}}\"; fi"
     done
 fi
@@ -319,7 +322,7 @@ docker run -d \
     --name "$CONTAINER_NAME" \
     --init \
     --restart "$RESTART" \
-    -p "${PORT}:6500" \
+    -p "${BIND:+$BIND:}${PORT}:6500" \
     -e RHINO_TOKEN="$RHINO_TOKEN" \
     -e RHINO_COMPUTE_CHILD_COUNT="$CHILD_COUNT" \
     "${ENV_ARGS[@]}" \

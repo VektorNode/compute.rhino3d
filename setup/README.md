@@ -161,9 +161,10 @@ Docker. On a server, copy each plugin's build output there (e.g. `rsync`)
 and point `LOCAL_PLUGINS` at the copies, or put them in `setup/plugins/`.
 The [one source per plugin](#one-source-per-plugin) rule applies there too.
 
-**Network.** Open port 6500 only to the hosts that run your app, and set
-`RHINO_COMPUTE_KEY` on both sides. Then point the app's Compute URL at
-`http://<server>:6500`.
+**Network.** Set `RHINO_COMPUTE_KEY` on both sides. Off a private network,
+serve Compute over [HTTPS](#https); otherwise open port 6500 only to the
+hosts that run your app, with a firewall outside the host (e.g. Hetzner Cloud
+Firewall): Docker's published ports bypass `ufw`.
 
 ## Deploying to a server
 
@@ -176,8 +177,9 @@ by `setup/.env.server` (template [.env.server.example](.env.server.example)). It
    the server builds the image from GitHub.
 2. Lists each plugin with the repo, branch and commit its folder belongs to, and asks
    before shipping one from a dirty tree or a branch other than its repo's default.
-3. Runs [server-init.sh](server-init.sh) with sudo when Docker is missing: Docker with
-   log rotation, plus git, rsync, curl and jq. It also works as a cloud's first-boot script.
+3. Runs [server-init.sh](server-init.sh) with sudo whenever it changed since it last ran
+   there: Docker with log rotation, git, rsync, curl and jq, automatic security updates,
+   and key-only SSH. It also works as a cloud's first-boot script.
 4. Syncs the plugin builds (`LOCAL_PLUGINS` from `setup/.env` unless `DEPLOY_PLUGINS`
    is set), `packages.json`, `setup/plugins/` and `setup/fonts/`, and writes the
    server's `setup/.env` from `.env.server`.
@@ -199,9 +201,13 @@ The `RhinoComputeKey` is the only thing between the internet and your Rhino bill
 plain HTTP sends it in clear text with every request. To reach the server from
 anywhere, set `DEPLOY_TLS_DOMAIN` in `.env.server` to a name that resolves to the
 server, open ports 80 and 443 to the internet, and deploy: a Caddy container then
-serves `https://<name>` with a Let's Encrypt certificate and forwards to Compute on
-the same machine, so port 6500 can stay closed. Without a DNS name of your own, a
-wildcard-DNS service such as `<ip-with-dashes>.sslip.io` resolves to the server.
+serves `https://<name>` with a Let's Encrypt certificate and HSTS, and forwards to
+Compute, which then listens on the server's localhost only. Without a DNS name of your
+own, a wildcard-DNS service such as `<ip-with-dashes>.sslip.io` resolves to the server.
+
+`DEPLOY_ALLOW_IPS` limits the proxy to the addresses that run your app; everyone else
+gets 403 before Compute sees the request. A firewall outside the host that allows only
+22, 80 and 443 (e.g. Hetzner Cloud Firewall) closes everything else.
 
 ### Idle shutdown and billing
 

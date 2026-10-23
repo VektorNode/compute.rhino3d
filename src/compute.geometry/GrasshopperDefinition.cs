@@ -813,37 +813,37 @@ namespace compute.geometry
                     // implicit fall-through to no-op.
                     ResthopperObject resthopperObject = goo switch
                     {
-                        GH_Boolean g => GetResthopperObject<bool>(g.Value, paramId, rhinoVersion),
-                        GH_Point g => GetResthopperObject<Point3d>(g.Value, paramId, rhinoVersion),
-                        GH_Vector g => GetResthopperObject<Vector3d>(g.Value, paramId, rhinoVersion),
-                        GH_Integer g => GetResthopperObject<int>(g.Value, paramId, rhinoVersion),
-                        GH_Number g => GetResthopperObject<double>(g.Value, paramId, rhinoVersion),
-                        GH_String g => GetResthopperObject<string>(g.Value, paramId, rhinoVersion),
-                        GH_SubD g => GetResthopperObject<SubD>(g.Value, paramId, rhinoVersion),
-                        GH_Line g => GetResthopperObject<Line>(g.Value, paramId, rhinoVersion),
-                        GH_Curve g => GetResthopperObject<Curve>(g.Value, paramId, rhinoVersion),
-                        GH_Circle g => GetResthopperObject<Circle>(g.Value, paramId, rhinoVersion),
-                        GH_Arc g => GetResthopperObject<Arc>(g.Value, paramId, rhinoVersion),
-                        GH_Plane g => GetResthopperObject<Plane>(g.Value, paramId, rhinoVersion),
-                        GH_Rectangle g => GetResthopperObject<Rectangle3d>(g.Value, paramId, rhinoVersion),
-                        GH_Box g => GetResthopperObject<Box>(g.Value, paramId, rhinoVersion),
-                        GH_Surface g => GetResthopperObject<Brep>(g.Value, paramId, rhinoVersion),
-                        GH_Brep g => GetResthopperObject<Brep>(g.Value, paramId, rhinoVersion),
-                        GH_Mesh g => GetResthopperObject<Mesh>(g.Value, paramId, rhinoVersion),
-                        GH_Extrusion g => GetResthopperObject<Extrusion>(g.Value, paramId, rhinoVersion),
-                        GH_PointCloud g => GetResthopperObject<PointCloud>(g.Value, paramId, rhinoVersion),
-                        GH_InstanceReference g => GetResthopperObject<InstanceReferenceGeometry>(g.Value, paramId, rhinoVersion),
-                        GH_Hatch g => GetResthopperObject<Hatch>(g.Value, paramId, rhinoVersion),
-                        GH_LinearDimension g => GetResthopperObject<LinearDimension>(g.Value, paramId, rhinoVersion),
-                        GH_RadialDimension g => GetResthopperObject<RadialDimension>(g.Value, paramId, rhinoVersion),
-                        GH_AngularDimension g => GetResthopperObject<AngularDimension>(g.Value, paramId, rhinoVersion),
-                        GH_OrdinateDimension g => GetResthopperObject<OrdinateDimension>(g.Value, paramId, rhinoVersion),
-                        GH_Leader g => GetResthopperObject<Leader>(g.Value, paramId, rhinoVersion),
-                        GH_TextEntity g => GetResthopperObject<TextEntity>(g.Value, paramId, rhinoVersion),
-                        GH_TextDot g => GetResthopperObject<TextDot>(g.Value, paramId, rhinoVersion),
-                        GH_Centermark g => GetResthopperObject<Centermark>(g.Value, paramId, rhinoVersion),
-                        // Selva: serialize GH_Colour output as a Color value.
-                        GH_Colour g => GetResthopperObject<Color>(g.Value, paramId, rhinoVersion),
+                        GH_Boolean g           => GetResthopperObject<bool>(g.Value, rhinoVersion),
+                        GH_Point g             => GetResthopperObject<Point3d>(g.Value, rhinoVersion),
+                        GH_Vector g            => GetResthopperObject<Vector3d>(g.Value, rhinoVersion),
+                        GH_Integer g           => GetResthopperObject<int>(g.Value, rhinoVersion),
+                        GH_Number g            => GetResthopperObject<double>(g.Value, rhinoVersion),
+                        GH_String g            => GetResthopperObject<string>(g.Value, rhinoVersion),
+                        GH_SubD g              => GetResthopperObject<SubD>(g.Value, rhinoVersion),
+                        GH_Line g              => GetResthopperObject<Line>(g.Value, rhinoVersion),
+                        GH_Curve g             => GetResthopperObject<Curve>(g.Value, rhinoVersion),
+                        GH_Circle g            => GetResthopperObject<Circle>(g.Value, rhinoVersion),
+                        GH_Arc g               => GetResthopperObject<Arc>(g.Value, rhinoVersion),
+                        GH_Plane g             => GetResthopperObject<Plane>(g.Value, rhinoVersion),
+                        GH_Rectangle g         => GetResthopperObject<Rectangle3d>(g.Value, rhinoVersion),
+                        GH_Box g               => GetResthopperObject<Box>(g.Value, rhinoVersion),
+                        GH_Surface g           => GetResthopperObject<Brep>(g.Value, rhinoVersion),
+                        GH_Brep g              => GetResthopperObject<Brep>(g.Value, rhinoVersion),
+                        GH_Mesh g              => GetResthopperObject<Mesh>(g.Value, rhinoVersion),
+                        GH_Extrusion g         => GetResthopperObject<Extrusion>(g.Value, rhinoVersion),
+                        GH_PointCloud g        => GetResthopperObject<PointCloud>(g.Value, rhinoVersion),
+                        GH_InstanceReference g => GetResthopperObject<InstanceReferenceGeometry>(g.Value, rhinoVersion),
+                        GH_Hatch g             => GetResthopperObject<Hatch>(g.Value, rhinoVersion),
+                        GH_LinearDimension g   => GetResthopperObject<LinearDimension>(g.Value, rhinoVersion),
+                        GH_RadialDimension g   => GetResthopperObject<RadialDimension>(g.Value, rhinoVersion),
+                        GH_AngularDimension g  => GetResthopperObject<AngularDimension>(g.Value, rhinoVersion),
+                        GH_OrdinateDimension g => GetResthopperObject<OrdinateDimension>(g.Value, rhinoVersion),
+                        GH_Leader g            => GetResthopperObject<Leader>(g.Value, rhinoVersion),
+                        GH_TextEntity g        => GetResthopperObject<TextEntity>(g.Value, rhinoVersion),
+                        GH_TextDot g           => GetResthopperObject<TextDot>(g.Value, rhinoVersion),
+                        GH_Centermark g        => GetResthopperObject<Centermark>(g.Value, rhinoVersion),
+                        // ── BEGIN VEKTORNODE: IO-HANDLERS — Selva output types ──
+                        GH_Colour g            => GetResthopperObject<Color>(g.Value, rhinoVersion),
 
                         // Selva SDK seam: any Goo implementing ISelvaSerializableGoo (matched by
                         // interface name, not assembly reference) owns its compute JSON. New Selva
@@ -851,7 +851,7 @@ namespace compute.geometry
                         // ISelvaSerializableGoo. The wire Type stays the unwrapped value's type name
                         // so the client demux is unchanged from the previous allowlist behaviour.
                         IGH_Goo gooObj when TryGetSelvaGooJson(gooObj, out string selvaJson)
-                            => BuildSelvaResthopperObject(gooObj, selvaJson, paramId),
+                            => BuildSelvaResthopperObject(gooObj, selvaJson),
 
                         // DEPRECATED — DELETE THIS ENTIRE arm in a future major.
                         // Purpose: serialize Selva output Goos from OLD plugin builds (Selva.GH +
@@ -866,31 +866,22 @@ namespace compute.geometry
                                              gooObj.GetType().FullName.IndexOf("FileDataGoo", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                              gooObj.GetType().FullName.IndexOf("UISchemaGoo", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                              gooObj.GetType().FullName.IndexOf("PlotlyFigure", StringComparison.OrdinalIgnoreCase) >= 0)
-                            => GetResthopperObject<object>(gooObj.GetType().GetProperty("Value")?.GetValue(gooObj), paramId, rhinoVersion),
-                        _ => null
+                            => GetResthopperObject<object>(gooObj.GetType().GetProperty("Value")?.GetValue(gooObj), rhinoVersion),
+                        // ── END   VEKTORNODE: IO-HANDLERS — Selva output types ──
+                        _                      => null
                     };
                     if (resthopperObject != null)
+                    {
+                        // VEKTORNODE: PARAM-ID — tag every object with its source parameter so the
+                        // client can demux outputs by parameter.
+                        resthopperObject.Id = paramId;
                         resthopperObjectList.Add(resthopperObject);
+                    }
                 }
                 // preserve paths when returning data
                 outputTree.Add(path.ToString(), resthopperObjectList);
             }
             return outputTree;
-
-            static ResthopperObject GetResthopperObject<T>(object goo, Guid paramId, int rhinoVerion)
-            {
-                var v = (T)goo;
-                ResthopperObject rhObj = new ResthopperObject();
-                rhObj.Type = goo.GetType().FullName;
-                rhObj.Id = paramId;
-
-                if (v is GeometryBase geometry)
-                    rhObj.Data = geometry.ToJSON(new Rhino.FileIO.SerializationOptions() { RhinoVersion = rhinoVerion });
-                else
-                    rhObj.Data = JsonConvert.SerializeObject(v, GeometryResolver.Settings(rhinoVerion));
-
-                return rhObj;
-            }
         }
 
         // ============================================================================
@@ -932,14 +923,13 @@ namespace compute.geometry
         // Wraps a Selva-owned JSON payload in a ResthopperObject, deriving the wire Type from the
         // unwrapped inner goo's Value (mirrors TryGetSelvaGooJson's unwrap) so the client demux is
         // unchanged from the previous allowlist behaviour.
-        static ResthopperObject BuildSelvaResthopperObject(IGH_Goo goo, string selvaJson, Guid paramId)
+        static ResthopperObject BuildSelvaResthopperObject(IGH_Goo goo, string selvaJson)
         {
             var innerGoo = goo is GH_ObjectWrapper w && w.Value is IGH_Goo ig ? ig : goo;
             var value = innerGoo.GetType().GetProperty("Value")?.GetValue(innerGoo);
             return new ResthopperObject
             {
                 Type = (value ?? innerGoo).GetType().FullName,
-                Id = paramId,
                 Data = selvaJson
             };
         }
@@ -1044,7 +1034,7 @@ namespace compute.geometry
                     Default = i.Value.GetDefault(),
                     Minimum = i.Value.GetMinimum(),
                     Maximum = i.Value.GetMaximum(),
-                    //SELVA -> provide a instance Guid for param consitency
+                    // VEKTORNODE: PARAM-ID — inputs carry their Instance Guid like outputs do.
                     Id = i.Value.Param.InstanceGuid.ToString(),
                     // VEKTORNODE: IO-HANDLERS — hierarchical group name + enumerated values.
                     GroupName = i.Value.GetGroupName(),
@@ -1190,6 +1180,20 @@ namespace compute.geometry
             if (!string.IsNullOrEmpty(str) && str[0] == (char)65279)
                 str = str.Substring(1);
             return str;
+        }
+
+        static ResthopperObject GetResthopperObject<T>(object goo, int rhinoVerion)
+        {
+            var v = (T)goo;
+            ResthopperObject rhObj = new ResthopperObject();
+            rhObj.Type = goo.GetType().FullName;
+
+            if (v is GeometryBase geometry)
+                rhObj.Data = geometry.ToJSON(new Rhino.FileIO.SerializationOptions() { RhinoVersion = rhinoVerion });
+            else
+                rhObj.Data = JsonConvert.SerializeObject(v, GeometryResolver.Settings(rhinoVerion));
+
+            return rhObj;
         }
 
         class InputGroup

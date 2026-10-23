@@ -54,12 +54,22 @@ parsing.
 
 `RHINO_COMPUTE_MAX_REQUEST_SIZE` default raised from 50 MB to 300 MB.
 
-### 4. Parameter-Id threading + contextual inputs (PARAM-ID, IO-HANDLERS)
+### 4. Parameter-Id threading + Selva IO types (PARAM-ID, IO-HANDLERS)
 **Files:** `src/compute.geometry/GrasshopperDefinition.cs`, `src/compute.geometry/IO/Schema.cs`
 
 Every emitted `ResthopperObject` is tagged with its source Grasshopper parameter's Instance Guid
-so the client can demux outputs by parameter. Adds Selva contextual inputs, hierarchical group
-names, enumerated values, and per-parameter declared defaults on the schema.
+so the client can demux outputs by parameter. The tag is set once after upstream's goo `switch`
+in `SerializeDataTree`, not passed through each arm, so that switch stays identical to upstream's
+and merges cleanly. Adds Selva contextual inputs, hierarchical group names, enumerated values,
+and per-parameter declared defaults on the schema.
+
+- **Output types.** Upstream's switch silently drops any goo it does not list. We add
+  `GH_Colour`, any goo implementing `ISelvaSerializableGoo` (matched by interface name, so compute
+  needs no reference to a Selva assembly), and a deprecated name-match arm for Selva plugin builds
+  that predate that interface.
+- **`/io` wire names.** The IO schema classes pin their JSON names with `[JsonProperty]`
+  (`paramType`, `atLeast`, `cachekey`, `inputnames`, …). Upstream serializes them with Newtonsoft
+  defaults, i.e. PascalCase, so dropping the attributes renames every field an `/io` client reads.
 
 ### 5. Errored-solve caching, opt-in (CACHE-ERRORED-SOLVES)
 **Files:** `src/compute.geometry/IO/Schema.cs`, `src/compute.geometry/ResthopperEndpoints.cs`
@@ -209,7 +219,6 @@ Tooling and docs with no upstream counterpart:
   `server-init.sh`, Multipass launchers and guides, `testing/` (startup-timing and comparison
   scripts), `plugins/`, `.env.example`, `packages.example.json`.
 - `docs/quick-start-docker.md`, `docs/grasshopper-plugins-not-loading-linux.md`.
-- `COMPUTE8_DIFFERENCES.md` — a stale leftover from an older branch; not maintained.
 - `.gitattributes`, `.gitignore` additions — local conventions.
 - `src/compute.geometry/compute.geometry.csproj` — `<Version>`, bumped on every upstream merge.
 

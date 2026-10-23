@@ -312,7 +312,7 @@ namespace compute.geometry
                 if (!string.IsNullOrWhiteSpace(cachedReturnJson))
                 {
                     ctx.Response.ContentType = "application/json";
-                    // VEKTORNODE: a cached result may be from an errored-but-completed
+                    // VEKTORNODE: CACHE-ERRORED-SOLVES — a cached result may be from an errored-but-completed
                     // solve (CacheErroredSolves). The live solve path returns 500 for an
                     // errored solve, so a cache HIT must return the SAME status — otherwise
                     // the same request yields 200 on a hit and 500 on a miss, and clients

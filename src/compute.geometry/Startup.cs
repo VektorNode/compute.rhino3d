@@ -218,10 +218,9 @@ namespace compute.geometry
                 Log.Information("(3/4) Loading grasshopper");
 
 #if LINUX
-                // VEKTORNODE: every failure mode here used to be silent — a missed load
-                // means definitions solve with core components only and no plugin
-                // (or RH_OUT-in-plugin-group) outputs, surfacing later as an opaque
-                // "no outputs" solve failure. Log each step.
+                // VEKTORNODE: SELVA FIX — log each step. A missed load means definitions
+                // solve with core components only and no plugin (or RH_OUT-in-plugin-group)
+                // outputs, surfacing later as an opaque "no outputs" solve failure.
                 Rhino.Runtime.HostUtils.SendDebugToCommandLine = Config.Debug;
                 var ghpath = RhinoInside.Resolver.RhinoSystemDirectory + "/Plug-ins/Grasshopper/GrasshopperPlugin.rhp";
                 Log.Information("Grasshopper plugin path: {Path} (exists: {Exists})", ghpath, System.IO.File.Exists(ghpath));
@@ -233,7 +232,7 @@ namespace compute.geometry
                 {
                     pluginObject.RunHeadless();
 
-                    // VEKTORNODE: GH loads external libraries exactly once, inside the
+                    // VEKTORNODE: SELVA FIX — GH loads external libraries exactly once, inside the
                     // Instances.ComponentServer getter (guarded by a null check). Any
                     // exception in that load is swallowed into a MessageBox that never
                     // shows headless — which is how plugin loading fails silently here.

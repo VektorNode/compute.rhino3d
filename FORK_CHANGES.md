@@ -33,6 +33,70 @@ Tags used:
 
 ---
 
+## For McNeel: candidates for upstream
+
+What we hit running upstream `9.x` on Linux (Docker) behind `rhino.compute`, and what we changed.
+§ numbers point to the detail under [Source changes](#source-changes); the code carries a
+`VEKTORNODE: SELVA FIX` marker, and the whole delta is
+[`9.x...VektorNode:9.x.selva`](https://github.com/mcneel/compute.rhino3d/compare/9.x...VektorNode:compute.rhino3d:9.x.selva).
+An entry goes when its section goes.
+
+**Compute fixes worth taking over**
+
+- **§8 A stopping child stays in the pool.** `SelectChild` prunes only children whose process has
+  exited, so one that has closed its listener on idle shutdown (or is alive with a dead listener)
+  keeps getting requests, which fail with "connection refused". *Fix:* the child POSTs
+  `/child-exiting` before it stops and the parent evicts it; the proxy also evicts and retries on
+  another child when a connection cannot be made. Nothing was sent, so no solve runs twice.
+- **§8 Child errors are missing from the parent log.** A child's non-2xx body reaches only the
+  caller. *Fix:* the parent logs status and (truncated) body.
+- **§15 Idle shutdown runs late.** A child asks `/idlespan` once per span, so it outlives the span
+  by up to another span: a 5-minute span runs 5–10 minutes. *Fix:* ask at least every 30 s.
+- **§9 `POST /cache/purge` frees little.** `MemoryCache.Trim(100)` may leave entries behind and
+  never disposes the `GeometryBase` held by URL-data entries. *Fix:* remove every key and dispose
+  `IDisposable` payloads.
+- **§6 Undo recording kills the child on Linux.** With `RHINO_COMPUTE_CREATE_HEADLESS_DOC` on,
+  `NewSolution` calls `RhinoDoc.BeginUndoRecord`, which on Linux invokes a GC'd
+  `Command.UndoCallback`; on any platform the recorder keeps every solve's state. *Fix:*
+  `UndoRecordingEnabled = false` on the headless doc.
+- **§10 Plugin load failures are silent on Linux.** Definitions then solve with core components
+  only (cause: the first Rhino bug below). *Fix:* trigger the `Instances.ComponentServer` load at
+  startup, log loading exceptions and loaded libraries, and quarantine GHAs that crash the scan.
+- **§14 Chunked 500s.** An uncompressed solve response is sent chunked, and Node's HTTP client
+  hangs on a chunked 500 until its timeout. Chunked is valid HTTP, so this is client
+  compatibility. *Fix:* set `Content-Length`.
+
+**Possible opt-ins**
+
+- **§12** Warnings reach `warnings[]` only when `Config.Debug` is on, so a production client never
+  sees one. An env flag to return them would cover it.
+- **§7** A 500 body has no machine-readable code, and its message is scrubbed outside Debug. A
+  `code` field, with a distinct `definition_not_cached` for a pointer that no longer resolves,
+  lets a client re-upload the definition instead of matching on text.
+
+**Not fixed here**
+
+- `rhino.compute`'s `/healthcheck` is `AddHealthChecks()` with no checks, so it reports healthy
+  while every child dies at startup.
+
+**Rhino / Grasshopper on Linux (outside compute; worked around here)**
+
+- `HostUtils.GetRuntimeSpecificFolder` passes a `null` OS suffix to `string.IndexOf` on Linux and
+  throws, for any GHA in a `netX.0` subfolder. `GH_ComponentServer.ExternalFiles` has no per-file
+  try/catch, so one such GHA stops every plugin from loading, and the exception goes to a
+  `MessageBox` that never shows headless. Write-up:
+  [docs/grasshopper-plugins-not-loading-linux.md](docs/grasshopper-plugins-not-loading-linux.md).
+- Loading a GHA built against an older RhinoCommon major runs
+  `PlugIn.CheckGrasshopperAssemblyCompatibility` → `RunCompat` → `DebugStringSafe` →
+  `RhinoApp.InvokeRequired`, a Linux stub that throws `RhinoFailException` and terminates
+  compute.geometry. The `rhino3d` build where this starts is named at the `RHINO3D_VERSION` pin in
+  [setup/Dockerfile](setup/Dockerfile).
+- `Curve.ClosestPoints` reaches the native `RHC_RhinoGetClosestPoint`, a Linux stub (`LINUXFAIL`
+  in `RhinoCore_linux_app.cpp`) that calls `std::terminate`: the child dies with no managed
+  exception, and the caller gets a 500 "response ended prematurely".
+
+---
+
 ## Source changes
 
 ### 1. Schema-extraction endpoints (SELVA)

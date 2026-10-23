@@ -124,6 +124,12 @@ namespace compute.geometry
         public static string[] GetDeprecationWarnings() => warnings.ToArray();
 
         /// <summary>
+        /// RHINO_COMPUTE_PROFILE_TOP: how many of a solve's slowest Grasshopper objects the
+        /// `X-Compute-Profile` response header names. Defaults to 5; 0 leaves the header off.
+        /// </summary>
+        public static int ProfileTop { get; private set; }
+
+        /// <summary>
         /// RHINO_COMPUTE_DEBUG: enables debug logging (defaults to true in DEBUG).
         /// </summary>
         public static bool Debug { get; private set; }
@@ -158,6 +164,8 @@ namespace compute.geometry
                 .Select(h => h.Trim())
                 .Where(h => h.Length > 0)
                 .ToArray();
+            // VEKTORNODE: SELVA — solve timing.
+            ProfileTop = Math.Max(0, GetEnvironmentVariable<int>(RHINO_COMPUTE_PROFILE_TOP, 5));
 
 #if DEBUG
             Debug = true;
@@ -192,6 +200,7 @@ namespace compute.geometry
         const string RHINO_COMPUTE_ENABLE_SCRIPTING = "RHINO_COMPUTE_ENABLE_SCRIPTING";
         const string RHINO_COMPUTE_COMPRESSION = "RHINO_COMPUTE_COMPRESSION";
         const string RHINO_COMPUTE_EVENT_SINK_HOSTS = "RHINO_COMPUTE_EVENT_SINK_HOSTS";
+        const string RHINO_COMPUTE_PROFILE_TOP = "RHINO_COMPUTE_PROFILE_TOP";
 
         // Host-only entries, so any port on the loopback interface matches: a dev Selva server
         // changes port far more often than it changes machine.

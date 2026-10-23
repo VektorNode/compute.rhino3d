@@ -702,6 +702,31 @@ namespace compute.geometry
             catch (JsonException) { value = default; return false; }
         }
 
+        // ── BEGIN VEKTORNODE: SELVA — solve timing ──
+        /// <summary>The last <see cref="Solve"/>'s <c>NewSolution</c> alone, without harvesting the outputs.</summary>
+        public long LastGhMilliseconds { get; private set; }
+
+        // Each object's ProcessorTime before the last solve: an object the solve did not expire
+        // keeps the time of the run that last computed it, so only a changed time is this solve's.
+        Dictionary<Guid, TimeSpan> processorTimeBefore = new Dictionary<Guid, TimeSpan>();
+
+        /// <summary>
+        /// The <paramref name="top"/> slowest objects the last solve computed, as JSON for the
+        /// <c>X-Compute-Profile</c> header. Non-ASCII is escaped: a header value must be ASCII.
+        /// </summary>
+        public string ProfileJson(int top)
+        {
+            var slowest = Definition.ActiveObjects()
+                .OfType<GH_ActiveObject>()
+                .Where(o => !processorTimeBefore.TryGetValue(o.InstanceGuid, out var before) || before != o.ProcessorTime)
+                .Select(o => new { name = o.Name, nick = o.NickName, ms = (long)o.ProcessorTime.TotalMilliseconds })
+                .Where(o => o.ms > 0)
+                .OrderByDescending(o => o.ms)
+                .Take(top);
+            return JsonConvert.SerializeObject(slowest, new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeNonAscii });
+        }
+        // ── END   VEKTORNODE: SELVA — solve timing ──
+
         public Schema Solve(int rhinoVersion, SchemaDataFormat format)
         {
             HasErrors = false;
@@ -710,7 +735,13 @@ namespace compute.geometry
 
             // solve definition
             Definition.Enabled = true;
+            // VEKTORNODE: SELVA — solve timing: the Grasshopper run alone, apart from harvesting.
+            processorTimeBefore = Definition.ActiveObjects()
+                .OfType<GH_ActiveObject>()
+                .ToDictionary(o => o.InstanceGuid, o => o.ProcessorTime);
+            var ghStopwatch = System.Diagnostics.Stopwatch.StartNew();
             Definition.NewSolution(false, GH_SolutionMode.CommandLine);
+            LastGhMilliseconds = ghStopwatch.ElapsedMilliseconds;
 
             foreach (string msg in ErrorMessages)
             {

@@ -375,12 +375,31 @@ namespace rhino.compute
         private static async Task ReverseProxyPost(HttpRequest req, HttpResponse res)
             => await ReverseProxyHandler(req, res, HttpMethod.Post);
 
+        // ── BEGIN VEKTORNODE: SELVA — solve timing ──
+        // The child's own timing and profile reach the caller, beside the proxy's: `init` waits for
+        // startup, `read` takes in the request body, `wait` gets a child (a spawn when none runs),
+        // `child` is the child's round trip, body included.
+        static readonly string[] ForwardedTimingHeaders = { "Server-Timing", "X-Compute-Profile" };
+
+        static void ForwardTiming(HttpResponseMessage from, HttpResponse to, long initMs, long readMs, long waitMs, long childMs)
+        {
+            foreach (var name in ForwardedTimingHeaders)
+                if (from.Headers.TryGetValues(name, out var values))
+                    foreach (var value in values)
+                        to.Headers.Append(name, value);
+            to.Headers.Append("Server-Timing",
+                $"proxy_init;dur={initMs}, proxy_read;dur={readMs}, proxy_wait;dur={waitMs}, proxy_child;dur={childMs}");
+        }
+        // ── END   VEKTORNODE: SELVA — solve timing ──
+
         // Shared proxy handler: forwards the request to a compute.geometry child, propagates
         // the response status code, and promotes the responding child to the front of the queue
         // on success so it is preferred for the next round-robin selection.
         private static async Task ReverseProxyHandler(HttpRequest req, HttpResponse res, HttpMethod method)
         {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             await AwaitInitTask();
+            long initMs = stopwatch.ElapsedMilliseconds;
             string responseString;
             try
             {
@@ -393,6 +412,7 @@ namespace rhino.compute
                         body = new System.IO.MemoryStream((int)Math.Clamp(req.ContentLength ?? 0, 0, int.MaxValue));
                         await req.Body.CopyToAsync(body, req.HttpContext.RequestAborted);
                     }
+                    long readMs = stopwatch.ElapsedMilliseconds - initMs;
 
                     // VEKTORNODE: SELVA FIX — a pooled child can be gone (idle self-shutdown, a Rhino
                     // crash) while its port is still handed out. A connection that could not be made
@@ -401,8 +421,10 @@ namespace rhino.compute
                     int maxAttempts = Math.Min(6, ComputeChildren.SpawnCount + 1);
                     for (int attempt = 0; ; attempt++)
                     {
+                        long acquireStart = stopwatch.ElapsedMilliseconds;
                         using (var child = ComputeChildren.AcquireChild())
                         {
+                            long childStart = stopwatch.ElapsedMilliseconds;
                             HttpResponseMessage proxyResponse;
                             try
                             {
@@ -428,6 +450,8 @@ namespace rhino.compute
                                 if (proxyResponse.Content.Headers.ContentType != null)
                                     res.ContentType = proxyResponse.Content.Headers.ContentType.ToString();
                                 responseString = await proxyResponse.Content.ReadAsStringAsync();
+                                ForwardTiming(proxyResponse, res, initMs, readMs,
+                                    childStart - acquireStart, stopwatch.ElapsedMilliseconds - childStart);
 
                                 // VEKTORNODE: SELVA FIX — the child's error body went to the caller only, so a
                                 // failed solve was undiagnosable from the parent log.

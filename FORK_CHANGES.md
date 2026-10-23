@@ -272,6 +272,22 @@ Upstream asks the parent for its idle time once per `idlespan`, so a child outli
 up to a whole span, and core-hour billing runs for all of it: a 5-minute span billed 5–10. The
 child now asks at least every `MaxSpanCheckSeconds` (30), so it exits within 30 s of the span.
 
+### 16. Solve timing reaches the caller (SELVA)
+**Files:** `src/compute.geometry/ResthopperEndpoints.cs` — `GrasshopperSolveHelper`, `Grasshopper`;
+`src/compute.geometry/GrasshopperDefinition.cs` — `Solve`, `ProfileJson`;
+`src/compute.geometry/Config.cs` — `RHINO_COMPUTE_PROFILE_TOP`;
+`src/rhino.compute/ReverseProxy.cs` — `ForwardTiming`
+
+Upstream's child sends `Server-Timing: decode, solve, encode`, but the proxy copies only
+`Content-Type`, so a caller behind `rhino.compute` never sees it; and `solve` lumps the
+Grasshopper run together with harvesting the outputs. The proxy now forwards the child's
+`Server-Timing` and `X-Compute-Profile` and adds its own `proxy_init` (startup), `proxy_read`
+(request body), `proxy_wait` (getting a child, a spawn included) and `proxy_child` (the child's
+round trip). The child adds `gh` (`NewSolution`) and `harvest` beside `solve`, which stays their
+sum for clients that read only the three upstream keys; a cache hit answers `cache;desc="hit"`.
+`X-Compute-Profile` names the solve's slowest objects by `ProcessorTime` as escaped-ASCII JSON,
+`RHINO_COMPUTE_PROFILE_TOP` of them (default 5, `0` turns it off).
+
 ---
 
 ## Non-source divergence

@@ -820,7 +820,9 @@ namespace compute.geometry
                 else if (format == SchemaDataFormat.Resthopper)
                 {
                     // Get data
-                    Resthopper.IO.DataTree<ResthopperObject> outputTree = SerializeDataTree(param.VolatileData, param.Attributes.Parent.InstanceGuid, kvp.Key, rhinoVersion) as Resthopper.IO.DataTree<ResthopperObject>;
+                    // VEKTORNODE: PARAM-ID — a standalone output parameter (an RH_OUT group's) has no parent.
+                    Guid paramId = param.Attributes?.Parent?.InstanceGuid ?? param.InstanceGuid;
+                    Resthopper.IO.DataTree<ResthopperObject> outputTree = SerializeDataTree(param.VolatileData, paramId, kvp.Key, rhinoVersion) as Resthopper.IO.DataTree<ResthopperObject>;
                     outputSchema.Values.Add(outputTree);
                 }
             }

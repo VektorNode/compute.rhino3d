@@ -513,7 +513,27 @@ namespace compute.geometry
             }
             catch (Exception)
             {
+                // VEKTORNODE: SELVA FIX — a raw JSON object or array is the value itself; un-escaping it
+                // corrupts its own escapes (\" inside a string ends the string). See FORK_CHANGES.md #16.
+                if (IsJsonContainer(restobj.Data))
+                    return new GH_String(restobj.Data);
                 return new GH_String(System.Text.RegularExpressions.Regex.Unescape(restobj.Data));
+            }
+        }
+
+        // VEKTORNODE: SELVA FIX — see DeserializeText.
+        static bool IsJsonContainer(string data)
+        {
+            string text = data?.Trim();
+            if (string.IsNullOrEmpty(text) || (text[0] != '{' && text[0] != '[')) return false;
+            try
+            {
+                Newtonsoft.Json.Linq.JToken.Parse(text);
+                return true;
+            }
+            catch (JsonReaderException)
+            {
+                return false;
             }
         }
 

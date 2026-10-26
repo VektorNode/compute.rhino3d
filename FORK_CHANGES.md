@@ -191,6 +191,20 @@ Compute never interprets the messages; the plugin decides.
 - No Selva plugin, an older one, or a definition without a Selva component: no constant is
   written, no `selva` block, behaviour as before.
 
+---
+
+### 16. Raw JSON on a contextual Text input passes through (SELVA FIX)
+**File:** `src/compute.geometry/GrasshopperDefinition.cs` — `DeserializeText`, `IsJsonContainer`
+
+Upstream reads a contextual Text (and Color, File) value as a JSON string literal and, when that
+throws, falls back to `Regex.Unescape` on the raw text. Selva hosts send JSON objects as the text
+itself (`{"process":"powder",…}`, vektor-fab's `Abschlüsse`), so they always hit the fallback, and
+`Regex.Unescape` rewrites their escapes: a `\"` inside a string becomes a bare quote and the JSON
+breaks; `\\` and `\n` change meaning. A value that parses as a JSON object or array is now passed
+through unchanged. A JSON string literal still unwraps as before; anything else (an escaped,
+unquoted payload that is not valid JSON) still goes through `Regex.Unescape`.
+Applies to `9.x.selva` too; not yet ported.
+
 ## Non-source divergence
 
 Repo/tooling files with no upstream counterpart, or deliberately changed:

@@ -409,6 +409,14 @@ namespace compute.geometry
             return new GH_Path(pathIndices);
         }
 
+        // VEKTORNODE: SELVA — after an aborted solve a component stopped mid-run reads as computed, so the next
+        // request sets every input again, which expires everything downstream of them.
+        public void ForgetInputs()
+        {
+            foreach (var group in input.Values)
+                group.CacheTree(null);
+        }
+
         public void SetInputs(Schema inputSchema)
         {
             // Collect names of inputs that were actually updated vs ones whose value was already

@@ -262,10 +262,11 @@ namespace compute.geometry
                 string returnJson = JsonConvert.SerializeObject(output, GeometryResolver.Settings(input.DataVersion));
                 long encodeTime = stopwatch.ElapsedMilliseconds;
                 // VEKTORNODE: SELVA — solve timing: `solve` stays the sum for clients that read only
-                // decode/solve/encode; `gh` and `harvest` split it.
+                // decode/solve/encode; `gh` and `harvest` split it. `recomputed` is ran/total objects.
                 long ghTime = definition.LastGhMilliseconds;
                 ctx.Response.Headers.Append("Server-Timing",
-                    $"decode;dur={decodeTime}, solve;dur={solveTime}, gh;dur={ghTime}, harvest;dur={solveTime - ghTime}, encode;dur={encodeTime}");
+                    $"decode;dur={decodeTime}, solve;dur={solveTime}, gh;dur={ghTime}, harvest;dur={solveTime - ghTime}, encode;dur={encodeTime}, " +
+                    $"recomputed;desc=\"{definition.LastRecomputedObjects}/{definition.LastActiveObjects}\"");
                 if (Config.ProfileTop > 0)
                     ctx.Response.Headers.Append("X-Compute-Profile", definition.ProfileJson(Config.ProfileTop));
                 if (definition.HasErrors)

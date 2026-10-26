@@ -356,12 +356,13 @@ namespace rhino.compute
                 else
                     content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 req.Content = content;
-                return await client.SendAsync(req);
+                // VEKTORNODE: SELVA — a caller that hangs up closes the child's request too, which aborts its solve.
+                return await client.SendAsync(req, initialRequest.HttpContext.RequestAborted);
             }
 
             if (method == HttpMethod.Get)
             {
-                return await client.GetAsync(proxyUrl);
+                return await client.GetAsync(proxyUrl, initialRequest.HttpContext.RequestAborted);
             }
 
             throw new System.NotSupportedException("Only GET and POST are currently supported for reverse proxy");

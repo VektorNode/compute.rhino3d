@@ -173,9 +173,20 @@ namespace compute.geometry
 
             return target;
         }
+
+        // The solve cache keys on the request less `selvaevents`: a live solve carries a new solve id and token
+        // every time, so its raw body never repeats.
+        static string SolveCacheKey(string body, Schema input)
+        {
+            if (input.SelvaEvents == null)
+                return body;
+            var request = Newtonsoft.Json.Linq.JObject.Parse(body);
+            request.Property("selvaevents", StringComparison.OrdinalIgnoreCase)?.Remove();
+            return request.ToString(Formatting.None);
+        }
         // ── END   VEKTORNODE: SELVA — live events ──
 
-        static string GrasshopperSolveHelper(Schema input, string body, System.Diagnostics.Stopwatch stopwatch, HttpContext ctx)
+        static string GrasshopperSolveHelper(Schema input, string cacheKey, System.Diagnostics.Stopwatch stopwatch, HttpContext ctx)
         {
             string httpType = ctx.Request.IsHttps ? "HTTPS" : "HTTP";
             string endpoint = ctx.GetEndpoint().DisplayName;
@@ -255,7 +266,12 @@ namespace compute.geometry
                 if (!String.IsNullOrEmpty(input.FileName))
                     fileNameMsg = $" {input.FileName}";
                 Serilog.Log.Debug($"Solving definition{fileNameMsg}...");
+                // VEKTORNODE: SELVA — a caller that hangs up aborts the solve: Grasshopper stops between components,
+                // and a component may poll the document's AbortRequested to stop inside one.
+                using var abort = ctx.RequestAborted.Register(definition.Definition.RequestAbortSolution);
+                ctx.RequestAborted.ThrowIfCancellationRequested();
                 var output = definition.Solve(input.DataVersion, input.DataFormat);
+                ctx.RequestAborted.ThrowIfCancellationRequested();
                 output.Pointer = definition.CacheKey;
                 long solveTime = stopwatch.ElapsedMilliseconds;
                 stopwatch.Restart();
@@ -281,13 +297,22 @@ namespace compute.geometry
                         definition.HasErrors
                             ? "Caching solve results (errored solve, CacheErroredSolves opt-in)"
                             : "Caching solve results");
-                    DataCache.SetCachedSolveResults(body, returnJson, shared);
+                    DataCache.SetCachedSolveResults(cacheKey, returnJson, shared);
                 }
 
                 return returnJson;
             }
+            catch (Exception ex) when (ctx.RequestAborted.IsCancellationRequested)
+            {
+                // VEKTORNODE: SELVA — nobody is left to answer, and an abandoned solve is not cached.
+                Serilog.Log.Debug(ex, "Caller hung up; solve abandoned");
+                return null;
+            }
             finally
             {
+                // VEKTORNODE: SELVA — see GrasshopperDefinition.ForgetInputs.
+                if (definition.Definition.AbortRequested || ctx.RequestAborted.IsCancellationRequested)
+                    definition.ForgetInputs();
                 if (headlessDoc != null)
                     CloseHeadlessDoc(headlessDoc, previousDoc);
                 definition.CheckIn();
@@ -311,11 +336,13 @@ namespace compute.geometry
             }
             if (input == null)
                 throw new BadRequestException("The request has no body.");
+            // VEKTORNODE: SELVA — live events: see SolveCacheKey.
+            string cacheKey = input.CacheSolve ? SolveCacheKey(body, input) : null;
            
             if (input.CacheSolve)
             {
                 // look in the cache to see if this has already been solved
-                string cachedReturnJson = DataCache.GetCachedSolveResults(body);
+                string cachedReturnJson = DataCache.GetCachedSolveResults(cacheKey);
                 if (!string.IsNullOrWhiteSpace(cachedReturnJson))
                 {
                     ctx.Response.ContentType = "application/json";
@@ -338,7 +365,7 @@ namespace compute.geometry
             string json = null;
             if (input.RecursionLevel > 0)
             {
-                json = GrasshopperSolveHelper(input, body, stopwatch, ctx);
+                json = GrasshopperSolveHelper(input, cacheKey, stopwatch, ctx);
             }
             else
             {
@@ -352,7 +379,7 @@ namespace compute.geometry
                 // to deal with solving many times simultaniously.
                 lock (ghSolveLock)
                 {
-                    json = GrasshopperSolveHelper(input, body, stopwatch, ctx);
+                    json = GrasshopperSolveHelper(input, cacheKey, stopwatch, ctx);
                 }
             }
 

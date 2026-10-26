@@ -227,6 +227,9 @@ Two rules carry the safety:
   it. Only an API-key holder can send a solve request, so this is defence in depth against a
   leaked key becoming an SSRF hop.
 
+The solve-result cache (`cachesolve`) keys on the request less `selvaevents` (`SolveCacheKey`):
+a live solve carries a new solve id and token every time, so its raw body never repeats.
+
 ### 12. Warnings reported outside Debug (SELVA FIX)
 **File:** `src/compute.geometry/GrasshopperDefinition.cs` — `LogRuntimeMessages`
 
@@ -316,6 +319,22 @@ Grasshopper errors also answers 500, so with definitions that raise errors by de
 every solve rotated to another child, whose cached document holds another caller's inputs or
 none: a cold solve each time. A 500 that carries `Server-Timing` came from a finished solve or a
 cache hit (the exception handler's 500 clears it), so that child now stays first as well.
+
+### 19. A caller that hangs up stops its solve (SELVA)
+**Files:** `src/rhino.compute/ReverseProxy.cs` — `SendProxyRequest`;
+`src/compute.geometry/ResthopperEndpoints.cs` — `GrasshopperSolveHelper`;
+`src/compute.geometry/GrasshopperDefinition.cs` — `ForgetInputs`
+
+Upstream's proxy does not pass a client's disconnect on, so the child finishes every solve its
+caller gave up on, holding the solve lock and the CPU. Selva's latest-wins scheduler abandons the
+in-flight solve whenever a slider moves on, so the solve the user is waiting for ran beside, or
+behind, one nobody wanted. The proxy now forwards the disconnect, and the child turns it into
+`RequestAbortSolution`: Grasshopper stops between components, and a long component must poll the
+document's `AbortRequested` to stop inside one. An abandoned solve is neither answered nor cached.
+
+After an aborted solve the child forgets which inputs it set, so the next request sets them all
+again. A component stopped mid-run reads as computed; without this, the same inputs again would
+return its empty outputs as a valid 200.
 
 ---
 

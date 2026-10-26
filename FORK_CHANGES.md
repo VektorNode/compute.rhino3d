@@ -124,7 +124,8 @@ parsing.
 Every emitted `ResthopperObject` is tagged with its source Grasshopper parameter's Instance Guid
 so the client can demux outputs by parameter. The tag is set once after upstream's goo `switch`
 in `SerializeDataTree`, not passed through each arm, so that switch stays identical to upstream's
-and merges cleanly. Adds Selva contextual inputs, hierarchical group names, enumerated values,
+and merges cleanly. A standalone output parameter (an `RH_OUT` group's) has no parent component,
+so it is tagged with its own guid. Adds Selva contextual inputs, hierarchical group names, enumerated values,
 and per-parameter declared defaults on the schema.
 
 - **Output types.** Upstream's switch silently drops any goo it does not list. We add

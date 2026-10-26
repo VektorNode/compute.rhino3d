@@ -441,7 +441,11 @@ namespace rhino.compute
                             using (proxyResponse)
                             {
                                 ComputeChildren.UpdateLastCall();
-                                if (proxyResponse.StatusCode == System.Net.HttpStatusCode.OK)
+                                // VEKTORNODE: SELVA FIX — a solve that finished with Grasshopper errors answers 500
+                                // but carries Server-Timing (an exception's 500 does not). That child is healthy and
+                                // holds the caller's warm document, so it stays first like a 200 would.
+                                if (proxyResponse.StatusCode == System.Net.HttpStatusCode.OK
+                                    || proxyResponse.Headers.Contains("Server-Timing"))
                                     ComputeChildren.MoveToFrontOfQueue(child.Port);
 
                                 res.StatusCode = (int)proxyResponse.StatusCode;

@@ -285,6 +285,10 @@ Grasshopper run together with harvesting the outputs. The proxy now forwards the
 (request body), `proxy_wait` (getting a child, a spawn included) and `proxy_child` (the child's
 round trip). The child adds `gh` (`NewSolution`) and `harvest` beside `solve`, which stays their
 sum for clients that read only the three upstream keys; a cache hit answers `cache;desc="hit"`.
+`recomputed;desc="ran/total"` counts the active objects the solve ran: a cached document keeps the
+data of everything an unchanged input feeds, so a low count is a warm solve and `total/total` a
+cold one. It is counted from the expired objects before `NewSolution`, because afterwards every
+object reads as computed.
 `X-Compute-Profile` names the solve's slowest objects by `ProcessorTime` as escaped-ASCII JSON,
 `RHINO_COMPUTE_PROFILE_TOP` of them (default 5, `0` turns it off).
 
@@ -301,6 +305,16 @@ breaks; `\\` and `\n` change meaning. A value that parses as a JSON object or ar
 through unchanged. A JSON string literal still unwraps as before; anything else (an escaped,
 unquoted payload that is not valid JSON) still goes through `Regex.Unescape`.
 Same change as `8.x.selva` #16.
+
+### 18. A solve with Grasshopper errors keeps its child first (SELVA FIX)
+**File:** `src/rhino.compute/ReverseProxy.cs` — `ReverseProxyHandler`
+
+`TakeChild` moves the child it picks to the back of the queue, and upstream moves it to the front
+again only on a 200, so a child that fails drops behind the others. A solve that finishes with
+Grasshopper errors also answers 500, so with definitions that raise errors by design (see #5)
+every solve rotated to another child, whose cached document holds another caller's inputs or
+none: a cold solve each time. A 500 that carries `Server-Timing` came from a finished solve or a
+cache hit (the exception handler's 500 clears it), so that child now stays first as well.
 
 ---
 

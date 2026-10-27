@@ -311,7 +311,9 @@ Tooling and docs with no upstream counterpart:
 - `setup/` — Docker/Linux deployment: `Dockerfile`, `.dockerignore`, `docker-launch.{ps1,sh}`,
   `docker-status.sh`, `start.sh`, `deploy-server.sh` with `.env.server.example`,
   `server-init.sh`, Multipass launchers and guides, `testing/` (startup-timing and comparison
-  scripts), `plugins/`, `.env.example`, `packages.example.json`.
+  scripts), `plugins/`, `.env.example`, `packages.example.json`, `infrastructure/.gitignore`
+  (Terraform state, variables and provider binaries stay local: they hold the Rhino token and
+  API key).
 - `docs/quick-start-docker.md`, `docs/grasshopper-plugins-not-loading-linux.md`.
 - `.gitattributes`, `.gitignore` additions — local conventions.
 - `src/compute.geometry/compute.geometry.csproj` — `<Version>`, bumped on every upstream merge.

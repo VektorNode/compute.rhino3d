@@ -266,12 +266,20 @@ namespace compute.geometry
                 if (!String.IsNullOrEmpty(input.FileName))
                     fileNameMsg = $" {input.FileName}";
                 Serilog.Log.Debug($"Solving definition{fileNameMsg}...");
-                // VEKTORNODE: SELVA — a caller that hangs up aborts the solve: Grasshopper stops between components,
-                // and a component may poll the document's AbortRequested to stop inside one.
-                using var abort = ctx.RequestAborted.Register(definition.Definition.RequestAbortSolution);
-                ctx.RequestAborted.ThrowIfCancellationRequested();
-                var output = definition.Solve(input.DataVersion, input.DataFormat);
-                ctx.RequestAborted.ThrowIfCancellationRequested();
+                // VEKTORNODE: SELVA — hang-up aborts the solve; a finished solve still gets encoded and cached.
+                Schema output;
+                var abort = ctx.RequestAborted.Register(definition.Definition.RequestAbortSolution);
+                try
+                {
+                    ctx.RequestAborted.ThrowIfCancellationRequested();
+                    output = definition.Solve(input.DataVersion, input.DataFormat);
+                }
+                finally
+                {
+                    abort.Dispose();
+                }
+                if (definition.Definition.AbortRequested)
+                    throw new OperationCanceledException(ctx.RequestAborted);
                 output.Pointer = definition.CacheKey;
                 long solveTime = stopwatch.ElapsedMilliseconds;
                 stopwatch.Restart();
@@ -311,7 +319,7 @@ namespace compute.geometry
             finally
             {
                 // VEKTORNODE: SELVA — see GrasshopperDefinition.ForgetInputs.
-                if (definition.Definition.AbortRequested || ctx.RequestAborted.IsCancellationRequested)
+                if (definition.Definition.AbortRequested)
                     definition.ForgetInputs();
                 if (headlessDoc != null)
                     CloseHeadlessDoc(headlessDoc, previousDoc);

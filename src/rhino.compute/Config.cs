@@ -59,6 +59,12 @@ namespace rhino.compute
         public static bool Compression { get; private set; }
 
         /// <summary>
+        /// RHINO_COMPUTE_ABORT_ON_HANGUP: a caller that hangs up closes its child's request too, so
+        /// the child stops the solve. Off by default; children inherit the variable.
+        /// </summary>
+        public static bool AbortOnHangUp { get; private set; }
+
+        /// <summary>
         /// Loads config from environment variables (or uses defaults).
         /// </summary>
         public static void Load()
@@ -70,6 +76,8 @@ namespace rhino.compute
             LogRetainDays = GetEnvironmentVariable(RHINO_COMPUTE_LOG_RETAIN_DAYS, 10);
 
             Compression = GetEnvironmentVariable(RHINO_COMPUTE_COMPRESSION, true);
+            // VEKTORNODE: SELVA — abort on hang-up.
+            AbortOnHangUp = GetEnvironmentVariable(RHINO_COMPUTE_ABORT_ON_HANGUP, false);
 
 #if DEBUG
             Debug = true;
@@ -90,6 +98,7 @@ namespace rhino.compute
         const string RHINO_COMPUTE_DEBUG = "RHINO_COMPUTE_DEBUG";
         const string RHINO_COMPUTE_LOG_LEVEL = "RHINO_COMPUTE_LOG_LEVEL";
         const string RHINO_COMPUTE_COMPRESSION = "RHINO_COMPUTE_COMPRESSION";
+        const string RHINO_COMPUTE_ABORT_ON_HANGUP = "RHINO_COMPUTE_ABORT_ON_HANGUP";
 
         readonly static List<string> warnings = new List<string>();
 

@@ -130,6 +130,13 @@ namespace compute.geometry
         public static int ProfileTop { get; private set; }
 
         /// <summary>
+        /// RHINO_COMPUTE_ABORT_ON_HANGUP: stop a solve whose caller hung up instead of finishing and
+        /// caching it. Off by default: a client that times out and retries may rely on the first
+        /// attempt finishing into the cache. Set on the parent rhino.compute; children inherit it.
+        /// </summary>
+        public static bool AbortOnHangUp { get; private set; }
+
+        /// <summary>
         /// RHINO_COMPUTE_DEBUG: enables debug logging (defaults to true in DEBUG).
         /// </summary>
         public static bool Debug { get; private set; }
@@ -166,6 +173,8 @@ namespace compute.geometry
                 .ToArray();
             // VEKTORNODE: SELVA — solve timing.
             ProfileTop = Math.Max(0, GetEnvironmentVariable<int>(RHINO_COMPUTE_PROFILE_TOP, 5));
+            // VEKTORNODE: SELVA — abort on hang-up.
+            AbortOnHangUp = GetEnvironmentVariable<bool>(RHINO_COMPUTE_ABORT_ON_HANGUP, false);
 
 #if DEBUG
             Debug = true;
@@ -201,6 +210,7 @@ namespace compute.geometry
         const string RHINO_COMPUTE_COMPRESSION = "RHINO_COMPUTE_COMPRESSION";
         const string RHINO_COMPUTE_EVENT_SINK_HOSTS = "RHINO_COMPUTE_EVENT_SINK_HOSTS";
         const string RHINO_COMPUTE_PROFILE_TOP = "RHINO_COMPUTE_PROFILE_TOP";
+        const string RHINO_COMPUTE_ABORT_ON_HANGUP = "RHINO_COMPUTE_ABORT_ON_HANGUP";
 
         // Host-only entries, so any port on the loopback interface matches: a dev Selva server
         // changes port far more often than it changes machine.

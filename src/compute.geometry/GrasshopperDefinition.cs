@@ -525,40 +525,18 @@ namespace compute.geometry
                     case "Geometry":
                         BuildAndAssignContextualTree(contextualParameter, tree, DeserializeGeometry);
                         break;
-                    ////////////////////////////////////////////////
-                    /// VEKTORNODE: IO-HANDLERS — Selva Specific Contextual Inputs
-                    /// (Color / File / ValueList — none of these exist upstream).
-                    ////////////////////////////////////////////////
-                    // Color and File arrive as (possibly escaped) JSON strings; DeserializeText
-                    // already does the JsonConvert-with-Regex.Unescape fallback these need.
-                    case "Color":
-                        BuildAndAssignContextualTree(contextualParameter, tree, DeserializeText);
+                    // ── BEGIN VEKTORNODE: IO-HANDLERS — contextual params of other types ──
+                    // Upstream drops a contextual param whose TypeName it does not list. One whose
+                    // AssignContextualDataTree takes DataTree<GH_String> gets its values as text and
+                    // parses them itself (Selva's Color, File, Image, ValueList), so a new type needs
+                    // no fork change.
+                    default:
+                        if (AcceptsTextTree(contextualParameter))
+                            BuildAndAssignContextualTree(contextualParameter, tree, DeserializeText);
+                        else
+                            AssignViaSetValues(contextualParameter, tree);
                         break;
-                    case "File":
-                        BuildAndAssignContextualTree(contextualParameter, tree, DeserializeText);
-                        break;
-                    // ValueList assigns via SetValues (a flat string list), not a contextual
-                    // data tree, so it can't use BuildAndAssignContextualTree.
-                    case "ValueList":
-                        {
-                            var stringList = new List<string>();
-                            foreach (KeyValuePair<string, List<ResthopperObject>> entree in tree)
-                            {
-                                for (int i = 0; i < entree.Value.Count; i++)
-                                {
-                                    ResthopperObject restobj = entree.Value[i];
-                                    string data;
-                                    try
-                                    { data = JsonConvert.DeserializeObject<string>(restobj.Data) ?? restobj.Data.Trim('"'); }
-                                    catch { data = restobj.Data.Trim('"'); }
-                                    stringList.Add(data);
-                                }
-                            }
-                            contextualParameter.GetType()
-                                .GetMethod("SetValues")?
-                                .Invoke(contextualParameter, new object[] { stringList });
-                        }
-                        break;
+                    // ── END   VEKTORNODE: IO-HANDLERS — contextual params of other types ──
                 }
                 return;
             }
@@ -649,6 +627,41 @@ namespace compute.geometry
                 t => t.GetMethod("AssignContextualDataTree"));
             method?.Invoke(param, new object[] { inputTree });
         }
+
+        // ── BEGIN VEKTORNODE: IO-HANDLERS — contextual params of other types ──
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, bool> acceptsTextTree =
+            new System.Collections.Concurrent.ConcurrentDictionary<Type, bool>();
+
+        static bool AcceptsTextTree(IGH_ContextualParameter param)
+        {
+            return acceptsTextTree.GetOrAdd(param.GetType(), t =>
+                t.GetMethod("AssignContextualDataTree", new[] { typeof(Grasshopper.DataTree<GH_String>) }) != null);
+        }
+
+        // Deprecated: Selva value lists whose AssignContextualDataTree predates DataTree<GH_String>
+        // take a flat string list through SetValues. Safe to remove once every deployed Selva plugin
+        // build has the text-tree signature.
+        static void AssignViaSetValues(IGH_ContextualParameter param, Resthopper.IO.DataTree<ResthopperObject> tree)
+        {
+            var setValues = param.GetType().GetMethod("SetValues");
+            if (setValues == null)
+                return;
+
+            var stringList = new List<string>();
+            foreach (KeyValuePair<string, List<ResthopperObject>> entree in tree)
+            {
+                foreach (ResthopperObject restobj in entree.Value)
+                {
+                    string data;
+                    try
+                    { data = JsonConvert.DeserializeObject<string>(restobj.Data) ?? restobj.Data.Trim('"'); }
+                    catch { data = restobj.Data.Trim('"'); }
+                    stringList.Add(data);
+                }
+            }
+            setValues.Invoke(param, new object[] { stringList });
+        }
+        // ── END   VEKTORNODE: IO-HANDLERS — contextual params of other types ──
 
         // Text inputs arrive either as JSON-escaped strings or as raw strings with escape
         // sequences; try JSON first, fall back to Regex.Unescape if that fails. Matches the

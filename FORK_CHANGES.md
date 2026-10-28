@@ -140,6 +140,13 @@ and per-parameter declared defaults on the schema.
   `GH_Colour`, any goo implementing `ISelvaSerializableGoo` (matched by interface name, so compute
   needs no reference to a Selva assembly), and a deprecated name-match arm for Selva plugin builds
   that predate that interface.
+- **Contextual inputs.** Upstream's `SetValues` assigns a contextual param only when its
+  `TypeName` is one it lists, and silently drops the rest. A default arm gives any contextual
+  param whose `AssignContextualDataTree` takes `DataTree<GH_String>` its values as text, through
+  the same `DeserializeText` as `Text`; the param parses them itself. Selva's Color, File, Image
+  and Value List params work this way, so a new Selva input type needs no fork change. A
+  deprecated fallback calls `SetValues(List<string>)` for Selva value lists from plugin builds
+  that predate the text-tree signature.
 - **`/io` wire names.** The IO schema classes pin their JSON names with `[JsonProperty]`
   (`paramType`, `atLeast`, `cachekey`, `inputnames`, …). Upstream serializes them with Newtonsoft
   defaults, i.e. PascalCase, so dropping the attributes renames every field an `/io` client reads.

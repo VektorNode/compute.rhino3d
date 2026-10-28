@@ -342,6 +342,10 @@ namespace rhino.compute
             // mark the current time as a call to a compute child process
             ComputeChildren.UpdateLastCall();
 
+            // VEKTORNODE: SELVA — a caller that hangs up closes the child's request too, which aborts its solve.
+            // Off, the child stays reserved until its solve ends, so no other request queues behind it.
+            var hangUp = Config.AbortOnHangUp ? initialRequest.HttpContext.RequestAborted : System.Threading.CancellationToken.None;
+
             if (method == HttpMethod.Post)
             {
                 // include RhinoComputeKey header in request to compute child process
@@ -356,13 +360,12 @@ namespace rhino.compute
                 else
                     content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 req.Content = content;
-                // VEKTORNODE: SELVA — a caller that hangs up closes the child's request too, which aborts its solve.
-                return await client.SendAsync(req, initialRequest.HttpContext.RequestAborted);
+                return await client.SendAsync(req, hangUp);
             }
 
             if (method == HttpMethod.Get)
             {
-                return await client.GetAsync(proxyUrl, initialRequest.HttpContext.RequestAborted);
+                return await client.GetAsync(proxyUrl, hangUp);
             }
 
             throw new System.NotSupportedException("Only GET and POST are currently supported for reverse proxy");

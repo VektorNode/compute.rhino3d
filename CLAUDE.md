@@ -14,8 +14,7 @@ those are the ones that get forgotten and then cost real time during the next up
 For a source change:
 
 1. Tag it in source: `// VEKTORNODE: <TAG> — <why>`. Use BEGIN/END banners for blocks.
-   Tags: `SELVA` (feature), `SELVA FIX` (bug fix vs upstream), `PARAM-ID`, `IO-HANDLERS`,
-   `CACHE-ERRORED-SOLVES`.
+   Tags: `SELVA` (feature), `SELVA FIX` (bug fix vs upstream), `PARAM-ID`, `IO-HANDLERS`.
 2. Add or update a numbered section in `FORK_CHANGES.md` covering **what upstream did, why that
    was wrong or insufficient for us, and what we do instead.** The "why" is what has value
    later; the diff already shows the "what".

@@ -40,7 +40,7 @@ namespace compute.geometry
                 if (!File.Exists(url))
                     throw new FileNotFoundException($"File not found: {url}");
                 var archive = new GH_Archive();
-                if (archive.ReadFromFile(url))
+                if (LinuxGhx.ReadFromFile(archive, url))
                     return archive;
                 return null;
             }
@@ -65,7 +65,7 @@ namespace compute.geometry
             var xml = new System.Text.UTF8Encoding(false).GetString(byteArray).TrimStart('﻿');
 
             var xmlArchive = new GH_Archive();
-            if (xmlArchive.Deserialize_Xml(xml))
+            if (xmlArchive.Deserialize_Xml(LinuxGhx.WithoutThumbnail(xml)))
                 return xmlArchive;
 
             return null;

@@ -95,6 +95,10 @@ An entry goes when its section goes.
 - `Curve.ClosestPoints` reaches the native `RHC_RhinoGetClosestPoint`, a Linux stub (`LINUXFAIL`
   in `RhinoCore_linux_app.cpp`) that calls `std::terminate`: the child dies with no managed
   exception, and the caller gets a 500 "response ended prematurely".
+- **§20** GH_IO's XML reader (`GH_Item.ReadXmlData`) decodes every `gh_drawing_bitmap` with
+  `new Bitmap(stream)`, and the `System.Drawing.Common` Rhino ships on Linux throws
+  `PlatformNotSupportedException`. The binary reader already skips that decode. Every saved `.ghx`
+  carries an archive thumbnail, so no `.ghx` loads.
 
 ---
 
@@ -352,6 +356,19 @@ behind, one nobody wanted. The proxy now forwards the disconnect, and the child 
 `RequestAbortSolution`: Grasshopper stops between components, and a long component must poll the
 again. A component stopped mid-run reads as computed; without this, the same inputs again would
 return its empty outputs as a valid 200.
+
+### 20. A `.ghx` loads on Linux (SELVA FIX)
+
+**Files:** `src/compute.geometry/LinuxGhx.cs` (entire file); `src/compute.geometry/GrasshopperDefinition.cs` —
+`ArchiveFromUrl`, `ArchiveFromXml`; `src/compute.geometry/GrasshopperValidationHelper.cs`
+
+On Linux every `.ghx` failed to load, in solves and in `grasshopper/schema` alike, with
+"System.Drawing.Common is not supported on non-Windows platforms": GH_IO decodes the archive's
+`Thumbnail` chunk while parsing (see the Linux list above). The Linux build now removes that chunk
+before GH_IO parses the XML. Nothing reads it when the `Definition` chunk is extracted. Local `.ghx`
+paths go through the same step instead of `GH_Archive.ReadFromFile`, which parses the file itself.
+A bitmap a component stores inside the definition still throws; no Selva component stores one.
+The Windows build is unchanged.
 
 ---
 

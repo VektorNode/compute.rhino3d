@@ -1161,7 +1161,8 @@ namespace compute.geometry
             {
                 // local file
                 var archive = new GH_Archive();
-                if (archive.ReadFromFile(url))
+                // VEKTORNODE: SELVA FIX — see LinuxGhx.
+                if (LinuxGhx.ReadFromFile(archive, url))
                 {
                     RegisterFileWatcher(url);
                     try
@@ -1238,7 +1239,8 @@ namespace compute.geometry
             var archive = new GH_Archive();
             try
             {
-                return archive.Deserialize_Xml(xml) ? archive : null;
+                // VEKTORNODE: SELVA FIX — see LinuxGhx.
+                return archive.Deserialize_Xml(LinuxGhx.WithoutThumbnail(xml)) ? archive : null;
             }
             catch (System.Xml.XmlException)
             {

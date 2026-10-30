@@ -26,7 +26,6 @@ Tags used:
 - **SELVA FIX** — a bug fix relative to upstream (wrapped in BEGIN/END banners).
 - **PARAM-ID** — threads the source Grasshopper parameter's Instance Guid through the IO model.
 - **IO-HANDLERS** — extra input/output type handlers + schema metadata not in upstream.
-- **CACHE-ERRORED-SOLVES** — opt-in caching of errored-but-completed solves.
 
 > **Auditing the delta against upstream:** use
 > `git diff --ignore-all-space upstream/9.x 9.x.selva`. A plain `git diff` also reports files
@@ -133,7 +132,8 @@ parsing.
 Every emitted `ResthopperObject` is tagged with its source Grasshopper parameter's Instance Guid
 so the client can demux outputs by parameter. The tag is set once after upstream's goo `switch`
 in `SerializeDataTree`, not passed through each arm, so that switch stays identical to upstream's
-and merges cleanly. Adds Selva contextual inputs, hierarchical group names, enumerated values,
+and merges cleanly. A standalone output parameter (an `RH_OUT` group's) has no parent component,
+so it is tagged with its own guid. Adds Selva contextual inputs, hierarchical group names, enumerated values,
 and per-parameter declared defaults on the schema.
 
 - **Output types.** Upstream's switch silently drops any goo it does not list. We add
@@ -150,13 +150,6 @@ and per-parameter declared defaults on the schema.
 - **`/io` wire names.** The IO schema classes pin their JSON names with `[JsonProperty]`
   (`paramType`, `atLeast`, `cachekey`, `inputnames`, …). Upstream serializes them with Newtonsoft
   defaults, i.e. PascalCase, so dropping the attributes renames every field an `/io` client reads.
-
-### 5. Errored-solve caching, opt-in (CACHE-ERRORED-SOLVES)
-
-**Files:** `src/compute.geometry/IO/Schema.cs`, `src/compute.geometry/ResthopperEndpoints.cs`
-
-By default an errored solve is not served from cache. Adds the opt-in flag and the detection of
-whether a cached solve-result JSON came from an errored-but-completed solve.
 
 ### 6. Undo recording forced off server-side (SELVA FIX)
 
@@ -249,6 +242,10 @@ Two rules carry the safety:
   it. Only an API-key holder can send a solve request, so this is defence in depth against a
   leaked key becoming an SSRF hop.
 
+The solve-result cache (`cachesolve`) keys on the raw body, as upstream, so it never hits a live
+solve: each carries a new solve id and token. Selva's own scheduler cache, keyed on the inputs,
+covers those.
+
 ### 12. Warnings reported outside Debug (SELVA FIX)
 
 **File:** `src/compute.geometry/GrasshopperDefinition.cs` — `LogRuntimeMessages`
@@ -313,6 +310,10 @@ Grasshopper run together with harvesting the outputs. The proxy now forwards the
 (request body), `proxy_wait` (getting a child, a spawn included) and `proxy_child` (the child's
 round trip). The child adds `gh` (`NewSolution`) and `harvest` beside `solve`, which stays their
 sum for clients that read only the three upstream keys; a cache hit answers `cache;desc="hit"`.
+`recomputed;desc="ran/total"` counts the active objects the solve ran: a cached document keeps the
+data of everything an unchanged input feeds, so a low count is a warm solve and `total/total` a
+cold one. It is counted from the expired objects before `NewSolution`, because afterwards every
+object reads as computed.
 `X-Compute-Profile` names the solve's slowest objects by `ProcessorTime` as escaped-ASCII JSON,
 `RHINO_COMPUTE_PROFILE_TOP` of them (default 5, `0` turns it off).
 
@@ -337,24 +338,33 @@ Same change as `8.x.selva` #16.
 
 `TakeChild` moves the child it picks to the back of the queue, and upstream moves it to the front
 again only on a 200, so a child that fails drops behind the others. A solve that finishes with
-Grasshopper errors also answers 500, so with definitions that raise errors by design (see #5)
-every solve rotated to another child, whose cached document holds another caller's inputs or
-none: a cold solve each time. A 500 that carries `Server-Timing` came from a finished solve or a
-cache hit (the exception handler's 500 clears it), so that child now stays first as well.
+Grasshopper errors also answers 500, so with definitions that raise errors by design every solve
+rotated to another child, whose cached document holds another caller's inputs or none: a cold
+solve each time. A 500 that carries `Server-Timing` came from a finished solve (the exception
+handler's 500 clears it), so that child now stays first as well.
 
-### 19. A caller that hangs up stops its solve (SELVA)
+### 19. A caller that hangs up stops its solve, opt-in (SELVA)
 
 **Files:** `src/rhino.compute/ReverseProxy.cs` — `SendProxyRequest`;
 `src/compute.geometry/ResthopperEndpoints.cs` — `GrasshopperSolveHelper`;
-`src/compute.geometry/GrasshopperDefinition.cs` — `ForgetInputs`
+`src/compute.geometry/GrasshopperDefinition.cs` — `Solve`;
+`src/rhino.compute/Config.cs`, `src/compute.geometry/Config.cs` — `AbortOnHangUp`
+
+Behind `RHINO_COMPUTE_ABORT_ON_HANGUP`, off by default, so a stock deployment behaves as upstream: a
+client that times out and retries may rely on the abandoned attempt finishing into the solve cache.
+Forgetting the inputs and not caching after an abort stay on regardless, since the Selva plugin
+aborts solves itself.
 
 Upstream's proxy does not pass a client's disconnect on, so the child finishes every solve its
 caller gave up on, holding the solve lock and the CPU. Selva's latest-wins scheduler abandons the
 in-flight solve whenever a slider moves on, so the solve the user is waiting for ran beside, or
-behind, one nobody wanted. The proxy now forwards the disconnect, and the child turns it into
-`RequestAbortSolution`: Grasshopper stops between components, and a long component must poll the
-again. A component stopped mid-run reads as computed; without this, the same inputs again would
-return its empty outputs as a valid 200.
+behind, one nobody wanted. The proxy now forwards the disconnect, and `Solve` takes the request's
+cancellation token and turns it into `RequestAbortSolution`: Grasshopper stops between components
+(a long component stops sooner only if it polls the abort flag itself). After any abort, the
+hang-up's or the Selva plugin's own, `Solve` forgets the inputs it last set, so the next request
+sets every one again, and the result is not cached. A component stopped mid-run reads as computed;
+without this, the same inputs again would return its partial outputs as a valid 200. A plugin abort
+with the caller still connected answers normally, with `selva.outcome.aborted` (#13).
 
 ### 20. A `.ghx` loads on Linux (SELVA FIX)
 

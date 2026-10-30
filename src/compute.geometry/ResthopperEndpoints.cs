@@ -102,44 +102,6 @@ namespace compute.geometry
             }
         }
 
-        // VEKTORNODE: CACHE-ERRORED-SOLVES — detect whether a cached solve-result JSON came from an errored
-        // solve, so a cache hit can mirror the live path's 500 status. Parses only the
-        // top-level "errors" array via a streaming reader — avoids deserializing the
-        // (potentially multi-MB) geometry payload. Any parse trouble → treat as no
-        // errors (caller falls back to 200), never throws.
-        static bool CachedResultHasErrors(string cachedJson)
-        {
-            if (string.IsNullOrEmpty(cachedJson))
-                return false;
-            try
-            {
-                using (var reader = new JsonTextReader(new System.IO.StringReader(cachedJson)))
-                {
-                    while (reader.Read())
-                    {
-                        if (reader.TokenType == JsonToken.PropertyName
-                            && string.Equals((string)reader.Value, "errors", StringComparison.OrdinalIgnoreCase))
-                        {
-                            // Move to the value; a non-empty array means the solve errored.
-                            if (!reader.Read() || reader.TokenType != JsonToken.StartArray)
-                                return false;
-                            while (reader.Read())
-                            {
-                                if (reader.TokenType == JsonToken.EndArray)
-                                    return false; // empty array → no errors
-                                return true; // first element seen → has errors
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Serilog.Log.Debug(ex, "CachedResultHasErrors: failed to inspect cached JSON; assuming no errors");
-            }
-            return false;
-        }
-
         // ── BEGIN VEKTORNODE: SELVA — live events ──
         /// <summary>
         ///     The callback target the document may use, or an empty target when the request
@@ -207,8 +169,12 @@ namespace compute.geometry
             var shared = definition;
             definition = shared.CheckOut();
             RhinoDoc headlessDoc = null, previousDoc = null;
+            // VEKTORNODE: SELVA — abort on hang-up, opt-in (see Config.AbortOnHangUp).
+            var hangUp = Config.AbortOnHangUp ? ctx.RequestAborted : System.Threading.CancellationToken.None;
             try
             {
+                // VEKTORNODE: SELVA — a caller that hung up while queued on the solve lock costs no input decoding.
+                hangUp.ThrowIfCancellationRequested();
                 // Instantiate headless doc
                 if (Config.CreateHeadlessDoc)
                 {
@@ -255,35 +221,40 @@ namespace compute.geometry
                 if (!String.IsNullOrEmpty(input.FileName))
                     fileNameMsg = $" {input.FileName}";
                 Serilog.Log.Debug($"Solving definition{fileNameMsg}...");
-                var output = definition.Solve(input.DataVersion, input.DataFormat);
+                // VEKTORNODE: SELVA — a hang-up aborts the solve; a finished solve still gets encoded and cached.
+                var output = definition.Solve(input.DataVersion, input.DataFormat, hangUp);
                 output.Pointer = definition.CacheKey;
                 long solveTime = stopwatch.ElapsedMilliseconds;
                 stopwatch.Restart();
                 string returnJson = JsonConvert.SerializeObject(output, GeometryResolver.Settings(input.DataVersion));
                 long encodeTime = stopwatch.ElapsedMilliseconds;
                 // VEKTORNODE: SELVA — solve timing: `solve` stays the sum for clients that read only
-                // decode/solve/encode; `gh` and `harvest` split it.
+                // decode/solve/encode; `gh` and `harvest` split it. `recomputed` is ran/total objects.
                 long ghTime = definition.LastGhMilliseconds;
                 ctx.Response.Headers.Append("Server-Timing",
-                    $"decode;dur={decodeTime}, solve;dur={solveTime}, gh;dur={ghTime}, harvest;dur={solveTime - ghTime}, encode;dur={encodeTime}");
+                    $"decode;dur={decodeTime}, solve;dur={solveTime}, gh;dur={ghTime}, harvest;dur={solveTime - ghTime}, encode;dur={encodeTime}, " +
+                    $"recomputed;desc=\"{definition.LastRecomputedObjects}/{definition.LastActiveObjects}\"");
                 if (Config.ProfileTop > 0)
                     ctx.Response.Headers.Append("X-Compute-Profile", definition.ProfileJson(Config.ProfileTop));
                 if (definition.HasErrors)
                     ctx.Response.StatusCode = 500; // internal server error
-
-                // VEKTORNODE: CACHE-ERRORED-SOLVES — an errored solve is not cached unless the
-                // request opts in (definitions that raise GH errors by design but still produce
-                // correct geometry). The HTTP status is unchanged either way.
-                if (input.CacheSolve && (!definition.HasErrors || input.CacheErroredSolves))
+                else
                 {
-                    Serilog.Log.Debug(
-                        definition.HasErrors
-                            ? "Caching solve results (errored solve, CacheErroredSolves opt-in)"
-                            : "Caching solve results");
-                    DataCache.SetCachedSolveResults(body, returnJson, shared);
+                    // VEKTORNODE: SELVA — an aborted solve's outputs are partial; the same inputs must solve again.
+                    if (input.CacheSolve && !definition.Definition.AbortRequested)
+                    {
+                        Serilog.Log.Debug("Caching solve results");
+                        DataCache.SetCachedSolveResults(body, returnJson, shared);
+                    }
                 }
 
                 return returnJson;
+            }
+            catch (OperationCanceledException) when (hangUp.IsCancellationRequested)
+            {
+                // VEKTORNODE: SELVA — nobody is left to answer, and an abandoned solve is not cached.
+                Serilog.Log.Debug("Caller hung up; solve abandoned");
+                return null;
             }
             finally
             {
@@ -318,14 +289,6 @@ namespace compute.geometry
                 if (!string.IsNullOrWhiteSpace(cachedReturnJson))
                 {
                     ctx.Response.ContentType = "application/json";
-                    // VEKTORNODE: CACHE-ERRORED-SOLVES — a cached result may be from an errored-but-completed
-                    // solve (CacheErroredSolves). The live solve path returns 500 for an
-                    // errored solve, so a cache HIT must return the SAME status — otherwise
-                    // the same request yields 200 on a hit and 500 on a miss, and clients
-                    // that branch on status see inconsistent behavior. The cached body
-                    // carries a non-empty "errors" array exactly when the solve errored.
-                    if (CachedResultHasErrors(cachedReturnJson))
-                        ctx.Response.StatusCode = 500;
                     // VEKTORNODE: SELVA — solve timing: a hit runs nothing, and says so.
                     ctx.Response.Headers.Append("Server-Timing", "cache;desc=\"hit\"");
                     await ctx.Response.WriteAsync(cachedReturnJson);

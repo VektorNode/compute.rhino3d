@@ -739,6 +739,13 @@ namespace compute.geometry
         /// <summary>The last <see cref="Solve"/>'s <c>NewSolution</c> alone, without harvesting the outputs.</summary>
         public long LastGhMilliseconds { get; private set; }
 
+        /// <summary>
+        /// How many active objects the last <see cref="Solve"/> ran, out of <see cref="LastActiveObjects"/>. The rest
+        /// kept the data of the solve before it, so a low count is a warm solve.
+        /// </summary>
+        public int LastRecomputedObjects { get; private set; }
+        public int LastActiveObjects { get; private set; }
+
         // Each object's ProcessorTime before the last solve: an object the solve did not expire
         // keeps the time of the run that last computed it, so only a changed time is this solve's.
         Dictionary<Guid, TimeSpan> processorTimeBefore = new Dictionary<Guid, TimeSpan>();
@@ -760,7 +767,7 @@ namespace compute.geometry
         }
         // ── END   VEKTORNODE: SELVA — solve timing ──
 
-        public Schema Solve(int rhinoVersion, SchemaDataFormat format)
+        public Schema Solve(int rhinoVersion, SchemaDataFormat format, CancellationToken cancel = default)
         {
             HasErrors = false;
             Schema outputSchema = new Schema();
@@ -769,12 +776,29 @@ namespace compute.geometry
             // solve definition
             Definition.Enabled = true;
             // VEKTORNODE: SELVA — solve timing: the Grasshopper run alone, apart from harvesting.
-            processorTimeBefore = Definition.ActiveObjects()
+            var activeObjects = Definition.ActiveObjects();
+            processorTimeBefore = activeObjects
                 .OfType<GH_ActiveObject>()
                 .ToDictionary(o => o.InstanceGuid, o => o.ProcessorTime);
+            // Expired now means NewSolution runs it. Counted here because afterwards every object reads Computed, and
+            // a ProcessorTime diff misses objects that run in 0 ms.
+            LastRecomputedObjects = activeObjects.Count(o => o.Phase == GH_SolutionPhase.Blank);
+            LastActiveObjects = activeObjects.Count;
             var ghStopwatch = System.Diagnostics.Stopwatch.StartNew();
-            Definition.NewSolution(false, GH_SolutionMode.CommandLine);
+            // VEKTORNODE: SELVA — cancelling aborts the solution; harvesting is not abortable, so it runs to the end.
+            // RequestAbortSolution is a no-op outside a solution, hence the check before it starts.
+            cancel.ThrowIfCancellationRequested();
+            using (cancel.Register(Definition.RequestAbortSolution))
+                Definition.NewSolution(false, GH_SolutionMode.CommandLine);
             LastGhMilliseconds = ghStopwatch.ElapsedMilliseconds;
+            if (Definition.AbortRequested)
+            {
+                // Also the Selva plugin's own abort. A component stopped mid-run reads as computed: forget the inputs
+                // so the next request sets every one again, which expires everything downstream of them.
+                foreach (var group in input.Values)
+                    group.CacheTree(null);
+                cancel.ThrowIfCancellationRequested();
+            }
 
             foreach (string msg in ErrorMessages)
             {
@@ -821,7 +845,9 @@ namespace compute.geometry
                 else if (format == SchemaDataFormat.Resthopper)
                 {
                     // Get data
-                    Resthopper.IO.DataTree<ResthopperObject> outputTree = SerializeDataTree(param.VolatileData, param.Attributes.Parent.InstanceGuid, kvp.Key, rhinoVersion) as Resthopper.IO.DataTree<ResthopperObject>;
+                    // VEKTORNODE: PARAM-ID — a standalone output parameter (an RH_OUT group's) has no parent.
+                    Guid paramId = param.Attributes?.Parent?.InstanceGuid ?? param.InstanceGuid;
+                    Resthopper.IO.DataTree<ResthopperObject> outputTree = SerializeDataTree(param.VolatileData, paramId, kvp.Key, rhinoVersion) as Resthopper.IO.DataTree<ResthopperObject>;
                     outputSchema.Values.Add(outputTree);
                 }
             }

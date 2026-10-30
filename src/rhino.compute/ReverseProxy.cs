@@ -342,6 +342,10 @@ namespace rhino.compute
             // mark the current time as a call to a compute child process
             ComputeChildren.UpdateLastCall();
 
+            // VEKTORNODE: SELVA — a caller that hangs up closes the child's request too, which aborts its solve.
+            // Off, the child stays reserved until its solve ends, so no other request queues behind it.
+            var hangUp = Config.AbortOnHangUp ? initialRequest.HttpContext.RequestAborted : System.Threading.CancellationToken.None;
+
             if (method == HttpMethod.Post)
             {
                 // include RhinoComputeKey header in request to compute child process
@@ -356,12 +360,12 @@ namespace rhino.compute
                 else
                     content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
                 req.Content = content;
-                return await client.SendAsync(req);
+                return await client.SendAsync(req, hangUp);
             }
 
             if (method == HttpMethod.Get)
             {
-                return await client.GetAsync(proxyUrl);
+                return await client.GetAsync(proxyUrl, hangUp);
             }
 
             throw new System.NotSupportedException("Only GET and POST are currently supported for reverse proxy");
@@ -441,7 +445,11 @@ namespace rhino.compute
                             using (proxyResponse)
                             {
                                 ComputeChildren.UpdateLastCall();
-                                if (proxyResponse.StatusCode == System.Net.HttpStatusCode.OK)
+                                // VEKTORNODE: SELVA FIX — a solve that finished with Grasshopper errors answers 500
+                                // but carries Server-Timing (an exception's 500 does not). That child is healthy and
+                                // holds the caller's warm document, so it stays first like a 200 would.
+                                if (proxyResponse.StatusCode == System.Net.HttpStatusCode.OK
+                                    || proxyResponse.Headers.Contains("Server-Timing"))
                                     ComputeChildren.MoveToFrontOfQueue(child.Port);
 
                                 res.StatusCode = (int)proxyResponse.StatusCode;

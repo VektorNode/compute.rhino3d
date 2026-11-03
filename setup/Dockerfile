@@ -41,10 +41,12 @@ RUN GDIP="$(dpkg -L libgdiplus | grep -m1 'libgdiplus\.so')" \
 # 3. Add McNeel package repo and install Rhino runtime libs
 # ============================================================
 # `stable main` resolves rhino3d to the newest nightly, so pin a known-good one.
-# From 9.0.26272 on, loading a GHA built against an older RhinoCommon major runs
-# PlugIn.RunCompat, which calls RhinoApp.InvokeRequired: a Linux stub that aborts
-# compute.geometry. Empty = track latest.
-ARG RHINO3D_VERSION=9.0.26271.7019
+# Grasshopper refuses a GHA built against a newer RhinoCommon than the one running,
+# silently when headless, so this must be at least what plugins reference (Selva
+# 0.24: 9.0.26300). 9.1.26300.9429 loads it and Rhino 8-built GHAs (SheepMetal)
+# without the 9.0.26272+ RunCompat abort; 9.2.26307 loads no GHAs at all.
+# Empty = track latest.
+ARG RHINO3D_VERSION=9.1.26300.9429
 
 RUN wget -qO- https://mcneel-packages.s3.amazonaws.com/mcneel-packages.gpg.key \
       | gpg --dearmor -o /usr/share/keyrings/mcneel-archive-keyring.gpg \

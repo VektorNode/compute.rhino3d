@@ -12,7 +12,6 @@ using System.Linq;
 using GH_IO.Serialization;
 using Newtonsoft.Json.Linq;
 using Rhino.PlugIns;
-using Serilog;
 
 namespace compute.geometry
 {
@@ -22,12 +21,13 @@ namespace compute.geometry
         {
             app.MapGet("", HomePage);
             app.MapGet("version", GetVersion);
-            app.MapGet("limits", GetLimits); // VEKTORNODE: SELVA — see FORK_CHANGES.md
+            app.MapGet("limits", GetLimits); // VEKTORNODE: SELVA — see FORK_CHANGES §21
             app.MapGet("servertime", ServerTime);
             app.MapGet("plugins/rhino/installed", GetInstalledPluginsRhino);
             app.MapGet("plugins/gh/installed", GetInstalledPluginsGrasshopper);
-            app.MapGet("grasshopper/schema", GetGrasshopperSchema);
-            app.MapPost("grasshopper/schema", GetGrasshopperSchema);
+            // VEKTORNODE: SELVA — schema-extraction endpoints, see FORK_CHANGES §1.
+            app.MapGet("grasshopper/schema", GetGrasshopperSchemaInfo);
+            app.MapPost("grasshopper/schema", GetGrasshopperSchemaFromFiles);
             app.MapPost("grasshopper/schema/url", GetGrasshopperSchemaFromUrl);
             app.MapPost("cache/purge", PurgeCache);
             app.MapPost("shutdown", ShutdownChild);
@@ -70,7 +70,7 @@ namespace compute.geometry
             string git_sha = null; // appveyor will replace this
             values.Add("git_sha", git_sha);
 
-            ctx.Response.ContentType = "application/json";
+            ctx.Response.ContentType= "application/json";
             await ctx.Response.WriteAsJsonAsync(values);
         }
 
@@ -140,43 +140,50 @@ namespace compute.geometry
             await ctx.Response.WriteAsJsonAsync(ghPluginInfo);
         }
 
-        static async Task GetGrasshopperSchema(HttpContext ctx)
+        // ── BEGIN VEKTORNODE: SELVA — schema-extraction endpoints ──
+        static async Task GetGrasshopperSchemaInfo(HttpContext ctx)
         {
-            Log.Debug("grasshopper/schema: method={Method} hasForm={HasForm} fileCount={FileCount}",
-                ctx.Request.Method, ctx.Request.HasFormContentType, ctx.Request.HasFormContentType ? ctx.Request.Form.Files.Count : 0);
-
-            if (ctx.Request.Method == "GET" || !ctx.Request.HasFormContentType || ctx.Request.Form.Files.Count == 0)
+            ctx.Response.ContentType = "application/json";
+            await ctx.Response.WriteAsync(Newtonsoft.Json.JsonConvert.SerializeObject(new
             {
-                Log.Debug("grasshopper/schema: returning endpoint description (no files uploaded)");
-                ctx.Response.ContentType = "application/json";
-                await ctx.Response.WriteAsync(Newtonsoft.Json.JsonConvert.SerializeObject(new
+                endpoint = "grasshopper/schema",
+                status = "available",
+                description = "Extracts the embedded schema from Grasshopper definition files (.gh/.ghx). Returns the full schema (inputs, outputs, metadata) when the definition is correctly wired (Context Bake → UI Builder with an embedded schema).",
+                usage = new
                 {
-                    endpoint = "grasshopper/schema",
-                    status = "available",
-                    description = "Extracts the embedded schema from Grasshopper definition files (.gh/.ghx). Returns the full schema (inputs, outputs, metadata) when the definition is correctly wired (Context Bake → UI Builder with an embedded schema).",
-                    usage = "POST multipart/form-data with one or more .gh or .ghx files."
-                }));
+                    file_upload = "POST grasshopper/schema — multipart/form-data with one or more .gh or .ghx files.",
+                    url = "POST grasshopper/schema/url — application/json with { \"urls\": [\"https://…/file.gh\"] } or { \"url\": \"https://…/file.gh\" }."
+                }
+            }));
+        }
+
+        static async Task GetGrasshopperSchemaFromFiles(HttpContext ctx)
+        {
+            var form = await ctx.Request.ReadFormAsync();
+
+            if (form.Files.Count == 0)
+            {
+                ctx.Response.StatusCode = 400;
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync(Newtonsoft.Json.JsonConvert.SerializeObject(new { error = "No files provided. POST multipart/form-data with one or more .gh or .ghx files." }));
                 return;
             }
 
             var results = new List<JObject>();
-
-            foreach (var file in ctx.Request.Form.Files)
+            foreach (var file in form.Files)
             {
                 var fileName = !string.IsNullOrEmpty(file.FileName) ? file.FileName : file.Name;
-                Log.Debug("grasshopper/schema: processing file={FileName} size={Size}", fileName, file.Length);
                 try
                 {
                     using var stream = file.OpenReadStream();
                     using var mem = new MemoryStream();
-                    stream.CopyTo(mem);
+                    await stream.CopyToAsync(mem);
 
-                    var archive = GrasshopperValidationHelper.ArchiveFromBytes(mem.ToArray());
+                    var archive = GrasshopperDefinition.ArchiveFromBytes(mem.ToArray());
                     results.Add(ExtractSchemaFromArchive(fileName, archive));
                 }
                 catch (Exception ex)
                 {
-                    Log.Error(ex, "grasshopper/schema: exception processing file={FileName}", fileName);
                     results.Add(GrasshopperValidationHelper.ErrorResult(fileName, ex.Message));
                 }
             }
@@ -185,8 +192,7 @@ namespace compute.geometry
             await ctx.Response.WriteAsync(Newtonsoft.Json.JsonConvert.SerializeObject(results));
         }
 
-        // VEKTORNODE: SELVA — fetch .gh/.ghx from URL(s) (or local path) and extract embedded schema.
-        // application/json body: { "urls": ["https://…/file.gh"] } or { "url": "https://…/file.gh" }.
+        // Body: { "urls": [...] } or { "url": "..." }; each a web URL or a local path.
         static async Task GetGrasshopperSchemaFromUrl(HttpContext ctx)
         {
             string body;
@@ -224,12 +230,12 @@ namespace compute.geometry
             {
                 try
                 {
-                    var archive = await GrasshopperValidationHelper.ArchiveFromUrlAsync(url);
+                    // Upstream's loader, so UrlGuard (private-URL block, size cap) applies here too.
+                    var archive = GrasshopperDefinition.ArchiveFromUrl(url, out _);
                     results.Add(ExtractSchemaFromArchive(url, archive));
                 }
                 catch (Exception ex)
                 {
-                    Log.Error(ex, "grasshopper/schema/url: exception processing url={Url}", url);
                     results.Add(GrasshopperValidationHelper.ErrorResult(url, ex.Message));
                 }
             }
@@ -238,75 +244,48 @@ namespace compute.geometry
             await ctx.Response.WriteAsync(Newtonsoft.Json.JsonConvert.SerializeObject(results));
         }
 
-        // Shared schema extraction for both the file-upload and URL endpoints.
         static JObject ExtractSchemaFromArchive(string fileName, GH_Archive archive)
         {
             if (archive == null)
-            {
-                Log.Warning("grasshopper/schema: failed to load archive for file={FileName}", fileName);
                 return GrasshopperValidationHelper.ErrorResult(fileName, "Failed to load the Grasshopper document.");
-            }
 
             var doc = GrasshopperValidationHelper.DocumentFromArchive(archive);
             if (doc == null)
-            {
-                Log.Warning("grasshopper/schema: failed to extract document from archive for file={FileName}", fileName);
                 return GrasshopperValidationHelper.ErrorResult(fileName, "Failed to extract definition from archive.");
-            }
-
-            Log.Information("grasshopper/schema: document loaded, objectCount={Count}", doc.ObjectCount);
-            var allTypes = string.Join(", ", doc.Objects.Select(o => o.GetType().Name).Distinct().OrderBy(n => n));
-            Log.Information("grasshopper/schema: component types in document: {Types}", allTypes);
 
             var schemaComponents = GrasshopperValidationHelper.GetSchemaContextBakeComponents(doc);
-            Log.Information("grasshopper/schema: found {Count} schema Context Bake component(s) in file={FileName}", schemaComponents.Count, fileName);
-
             if (schemaComponents.Count == 0)
-            {
                 return GrasshopperValidationHelper.ErrorResult(fileName,
                     "This definition has no outputs defined. " +
                     "Add a 'Context Bake' component, connect a 'UI Builder' component to its first input, " +
                     "and make sure the Schema output param is named 'Schema'.");
-            }
 
             var schemas = new JArray();
             foreach (var component in schemaComponents)
             {
                 var parent = GrasshopperValidationHelper.GetSchemaParentComponent(component);
-                Log.Debug("grasshopper/schema: schema parent component type={Type}", parent?.GetType().Name ?? "null");
-
                 if (!GrasshopperValidationHelper.IsComponentOfType(parent, "GH_UIBuilderComponent"))
-                {
-                    var error = "The 'Schema' source is not coming from a 'UI Builder' component.";
-                    Log.Warning("grasshopper/schema: {Error} (got {Type})", error, parent?.GetType().Name ?? "null");
-                    return GrasshopperValidationHelper.ErrorResult(fileName, error);
-                }
+                    return GrasshopperValidationHelper.ErrorResult(fileName, "The 'Schema' source is not coming from a 'UI Builder' component.");
 
                 var schema = GrasshopperValidationHelper.GetEmbeddedSchema(parent);
                 if (schema == null)
-                {
-                    var error = "The UI Builder component was found but contains no embedded schema. Configure and save your schema inside the UI Builder component.";
-                    Log.Warning("grasshopper/schema: {Error}", error);
-                    return GrasshopperValidationHelper.ErrorResult(fileName, error);
-                }
+                    return GrasshopperValidationHelper.ErrorResult(fileName,
+                        "The UI Builder component was found but contains no embedded schema. Configure and save your schema inside the UI Builder component.");
 
                 var schemaJson = GrasshopperValidationHelper.SchemaToJson(schema);
                 if (schemaJson == null)
-                {
-                    var error = "Could not serialize the embedded schema: this compute server could not reach " +
-                        "the Selva plugin's own serializer (UISchemaGoo.ToComputeJson). Serializing it here would " +
+                    return GrasshopperValidationHelper.ErrorResult(fileName,
+                        "Could not serialize the embedded schema: this compute server could not reach the " +
+                        "Selva plugin's own serializer (UISchemaGoo.ToComputeJson). Serializing it here would " +
                         "emit PascalCase property names that clients read as an empty schema. Check that the " +
-                        "installed Selva.gha matches this compute build.";
-                    Log.Warning("grasshopper/schema: {Error}", error);
-                    return GrasshopperValidationHelper.ErrorResult(fileName, error);
-                }
+                        "installed Selva.gha matches this compute build.");
 
-                Log.Debug("grasshopper/schema: extracted schema successfully from file={FileName}", fileName);
                 schemas.Add(schemaJson);
             }
 
             return GrasshopperValidationHelper.SuccessResult(fileName, schemas);
         }
+        // ── END   VEKTORNODE: SELVA — schema-extraction endpoints ──
     }
 }
 

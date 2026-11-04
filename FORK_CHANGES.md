@@ -46,26 +46,25 @@ An entry goes when its section goes.
 
 - **§8 A stopping child stays in the pool.** `SelectChild` prunes only children whose process has
   exited, so one that has closed its listener on idle shutdown (or is alive with a dead listener)
-  keeps getting requests, which fail with "connection refused". _Fix:_ the child POSTs
-  `/child-exiting` before it stops and the parent evicts it; the proxy also evicts and retries on
-  another child when a connection cannot be made. Nothing was sent, so no solve runs twice.
+  keeps getting requests, which fail with "connection refused". _Fix:_ when a connection cannot be
+  made, the proxy evicts that child and retries on another. Nothing was sent, so no solve runs
+  twice.
 - **§8 Child errors are missing from the parent log.** A child's non-2xx body reaches only the
   caller. _Fix:_ the parent logs status and (truncated) body.
 - **§15 Idle shutdown runs late.** A child asks `/idlespan` once per span, so it outlives the span
   by up to another span: a 5-minute span runs 5–10 minutes. _Fix:_ ask at least every 30 s.
-- **§9 `POST /cache/purge` frees little.** `MemoryCache.Trim(100)` may leave entries behind and
-  never disposes the `GeometryBase` held by URL-data entries. _Fix:_ remove every key and dispose
-  `IDisposable` payloads.
+- **§9 `POST /cache/purge` leaves entries behind.** `MemoryCache.Trim(100)` is best-effort.
+  _Fix:_ remove every key.
 - **§6 Undo recording kills the child on Linux.** With `RHINO_COMPUTE_CREATE_HEADLESS_DOC` on,
   `NewSolution` calls `RhinoDoc.BeginUndoRecord`, which on Linux invokes a GC'd
   `Command.UndoCallback`; on any platform the recorder keeps every solve's state. _Fix:_
   `UndoRecordingEnabled = false` on the headless doc.
 - **§10 Plugin load failures are silent on Linux.** Definitions then solve with core components
-  only (cause: the first Rhino bug below). _Fix:_ trigger the `Instances.ComponentServer` load at
-  startup, log loading exceptions and loaded libraries, and quarantine GHAs that crash the scan.
-- **§14 Chunked 500s.** An uncompressed solve response is sent chunked, and Node's HTTP client
-  hangs on a chunked 500 until its timeout. Chunked is valid HTTP, so this is client
-  compatibility. _Fix:_ set `Content-Length`.
+  only (cause: the first Rhino bug below). _Fix:_ log `ComponentServer.LoadingExceptions`, and
+  quarantine GHAs that crash the scan before it runs.
+- **§14 Chunked 500s.** `rhino.compute` sends an uncompressed answer chunked, and Node's HTTP
+  client hangs on a chunked 500 until its timeout. Chunked is valid HTTP, so this is client
+  compatibility. _Fix:_ the proxy sets `Content-Length`.
 
 **Possible opt-ins**
 
@@ -106,25 +105,14 @@ An entry goes when its section goes.
 
 ### 1. Schema-extraction endpoints (SELVA)
 
-**Files:** `src/compute.geometry/FixedEndpoints.cs`, `src/compute.geometry/GrasshopperValidationHelper.cs` (entire file)
+**Files:** `src/compute.geometry/FixedEndpoints.cs`, `src/compute.geometry/GrasshopperValidationHelper.cs` (entire file),
+`src/compute.geometry/GrasshopperDefinition.cs` (`ArchiveFromBytes` made `internal`)
 
-Adds the `grasshopper/schema` family of endpoints (definition IO + validation) used by Selva to
-introspect a definition's inputs/outputs, including fetching `.gh`/`.ghx` from a URL or local
-path and extracting the embedded schema. Not present in upstream.
-
-### 2. UTF-8 BOM handling for `.ghx` (SELVA FIX)
-
-**File:** `src/compute.geometry/GrasshopperValidationHelper.cs`
-
-Rhino writes `.ghx` with a UTF-8 BOM. `Encoding.UTF8.GetString` keeps the BOM as a leading
-character, so the XML parse failed on definitions saved from Rhino. The BOM is stripped before
-parsing.
-
-### 3. Larger default max request size (SELVA)
-
-**File:** `src/compute.geometry/Config.cs`
-
-`RHINO_COMPUTE_MAX_REQUEST_SIZE` default raised from 50 MB to 300 MB.
+Adds the `grasshopper/schema` endpoints Selva uses to read the UI Builder schema embedded in a
+`.gh`/`.ghx`, uploaded or fetched from a URL or local path. Not present in upstream. Files load
+through upstream's `ArchiveFromBytes`/`ArchiveFromUrl`, so its BOM strip, #20 and `UrlGuard`
+(private-URL block, `MaxRequestSize` cap) apply as they do to a solve. Same endpoints as
+`8.x.selva`.
 
 ### 4. Parameter-Id threading + Selva IO types (PARAM-ID, IO-HANDLERS)
 
@@ -147,9 +135,11 @@ and per-parameter declared defaults on the schema.
   and Value List params work this way, so a new Selva input type needs no fork change. A
   deprecated fallback calls `SetValues(List<string>)` for Selva value lists from plugin builds
   that predate the text-tree signature.
-- **`/io` wire names.** The IO schema classes pin their JSON names with `[JsonProperty]`
-  (`paramType`, `atLeast`, `cachekey`, `inputnames`, …). Upstream serializes them with Newtonsoft
-  defaults, i.e. PascalCase, so dropping the attributes renames every field an `/io` client reads.
+- **Output Id.** An output's Id is its top-level object's Instance Guid, i.e. the Context Bake
+  component Selva keys outputs by; a floating `RH_OUT` param is its own. `/io` and the solve carry
+  the same Id.
+- **`/io` wire names.** Upstream's PascalCase is kept; only the fields we add are camelCase
+  (`id`, `groupName`, `values`), as on `8.x.selva`.
 
 ### 5. Errored-solve caching, opt-in (CACHE-ERRORED-SOLVES)
 
@@ -176,42 +166,41 @@ Adds a machine-readable `code` to the error body in **both** debug and productio
 stale-pointer cache miss (a `pointer` that no longer resolves and no `algo` to fall back on)
 surfaces as a 500 with `definition_not_cached`, which the `@selvajs/compute` client uses to
 transparently re-upload the definition. Upstream answers every failed definition load with a
-400 `BadRequestException`; that stays for everything except the stale pointer.
+400 `BadRequestException`; that stays for everything except the stale pointer, and its body
+carries `code: "bad_request"`.
 
 ### 8. Dead-child eviction + proxy retry (SELVA FIX)
 
 **Files:** `src/rhino.compute/ComputeChildren.cs` (`EvictChild`), `src/rhino.compute/ReverseProxy.cs`
-(`/child-exiting`, retry loop), `src/compute.geometry/Shutdown.cs` (`NotifyParentExiting`)
+(retry loop)
 
-A child that had self-exited on idle timeout stayed in the round-robin pool, so every request
-routed to it failed with "connection refused" until a manual `/shutdown-children`. A child now
-POSTs `/child-exiting` just before it stops listening; the parent evicts that port; and the proxy
-evicts-and-retries on `HttpRequestError.ConnectionError`. The retry only fires when the connection
-was never established, so no solve is ever duplicated. It wraps upstream's `AcquireChild` lease
-(each attempt takes and releases its own), and the request body, which upstream already reads in
-full before sending, is read once in the handler so every attempt re-sends the same bytes.
-Non-success child responses are logged with their body, so 500s from compute.geometry are
-diagnosable from the parent log.
+`SelectChild` prunes only exited processes, so a child that had closed its listener (idle
+shutdown, or alive with a dead listener) stayed in the pool and every request routed to it failed
+with "connection refused" until a manual `/shutdown-children`. The proxy now evicts that child and
+retries on another on `HttpRequestError.ConnectionError`, which fires only when no connection was
+made, so no solve runs twice. The evicted child is killed unless another request still holds a
+lease on it. Each attempt takes and releases its own `AcquireChild` lease, and the request body,
+which upstream already reads in full, is read once in the handler so every attempt re-sends the
+same bytes. Non-success child responses are logged with their body, so 500s from compute.geometry
+are diagnosable from the parent log.
 
 ### 9. Solve-result cache purge frees native geometry (SELVA FIX)
 
 **File:** `src/compute.geometry/DataCache.cs` — `PurgeSolveResults`
 
-`resultsCache.Trim(100)` is best-effort (it may leave entries behind) and drops only the managed
-reference. URL-data entries hold a `Tuple<JToken, object>` whose `Item2` may be a `GeometryBase`
-wrapping unmanaged C++ memory, so the purge did not actually relieve memory pressure. Now
-enumerates and removes every key explicitly and disposes any `IDisposable` payload.
+`resultsCache.Trim(100)` is best-effort and may leave entries behind. Every key is now removed.
+Payloads are not disposed: a concurrent solve may still use the cached geometry.
 
 ### 10. Linux Grasshopper plugin loading — diagnostics + quarantine (SELVA FIX)
 
-**File:** `src/compute.geometry/Startup.cs` (`#if LINUX` block)
+**Files:** `src/compute.geometry/LinuxGhPlugins.cs` (entire file), `src/compute.geometry/Startup.cs`
+(one call after `RunHeadless`)
 
-Two problems, both previously silent:
+Upstream logs each loaded assembly. Two problems remain, both silent:
 
-- **Silent failure.** Every failure mode in the Linux GH load path was unlogged. A missed load
-  meant definitions solved with core components only and no plugin outputs, surfacing much later
-  as an opaque "no outputs" failure. Each step is now logged, including load result, loading
-  exceptions and the list of loaded libraries.
+- **Load errors.** GH reports a library load failure in a `MessageBox` that never shows headless,
+  so definitions solved with core components only and the cause surfaced much later as "no
+  outputs". `ComponentServer.LoadingExceptions` is now logged.
 - **Rhino 9 WIP bug.** `PlugIn.GetMultiTargetPath` → `HostUtils.GetRuntimeSpecificFolder` throws
   on Linux (the OS suffix is null, and `string.IndexOf(null)` throws) for any plugin laid out with
   TFM subfolders (`MyPlugin/net7.0/MyPlugin.gha`). `GH_ComponentServer.ExternalFiles` has no
@@ -282,14 +271,14 @@ Compute never interprets the messages; the plugin decides.
 - No Selva plugin, an older one, or a definition without a Selva component: no constant is
   written, no `selva` block, behaviour as before.
 
-### 14. Solve responses carry a Content-Length (SELVA FIX)
+### 14. Proxied responses carry a Content-Length (SELVA FIX)
 
-**File:** `src/compute.geometry/ResthopperEndpoints.cs` — end of `Grasshopper`
+**File:** `src/rhino.compute/ReverseProxy.cs` — `ReverseProxyHandler`
 
-Upstream writes the solve JSON with `WriteAsync`, so an answer that is not gzipped goes out
-chunked. The Node client fails to read a chunked 500 and hangs until its timeout. The body is
-encoded once and written with `ContentLength` set. With gzip (upstream's compression middleware)
-the middleware sets the length of what it sends instead.
+The parent is what a caller sees, and it writes the child's answer with `WriteAsync`, so an answer
+that is not gzipped goes out chunked. The Node client fails to read a chunked 500 and hangs until
+its timeout. The proxy sets `ContentLength` before writing; with gzip, upstream's compression
+middleware replaces it with the compressed length.
 
 ### 15. Idle shutdown on time (SELVA FIX)
 
@@ -331,35 +320,10 @@ through unchanged. A JSON string literal still unwraps as before; anything else 
 unquoted payload that is not valid JSON) still goes through `Regex.Unescape`.
 Same change as `8.x.selva` #16.
 
-### 18. A solve with Grasshopper errors keeps its child first (SELVA FIX)
-
-**File:** `src/rhino.compute/ReverseProxy.cs` — `ReverseProxyHandler`
-
-`TakeChild` moves the child it picks to the back of the queue, and upstream moves it to the front
-again only on a 200, so a child that fails drops behind the others. A solve that finishes with
-Grasshopper errors also answers 500, so with definitions that raise errors by design (see #5)
-every solve rotated to another child, whose cached document holds another caller's inputs or
-none: a cold solve each time. A 500 that carries `Server-Timing` came from a finished solve or a
-cache hit (the exception handler's 500 clears it), so that child now stays first as well.
-
-### 19. A caller that hangs up stops its solve (SELVA)
-
-**Files:** `src/rhino.compute/ReverseProxy.cs` — `SendProxyRequest`;
-`src/compute.geometry/ResthopperEndpoints.cs` — `GrasshopperSolveHelper`;
-`src/compute.geometry/GrasshopperDefinition.cs` — `ForgetInputs`
-
-Upstream's proxy does not pass a client's disconnect on, so the child finishes every solve its
-caller gave up on, holding the solve lock and the CPU. Selva's latest-wins scheduler abandons the
-in-flight solve whenever a slider moves on, so the solve the user is waiting for ran beside, or
-behind, one nobody wanted. The proxy now forwards the disconnect, and the child turns it into
-`RequestAbortSolution`: Grasshopper stops between components, and a long component must poll the
-again. A component stopped mid-run reads as computed; without this, the same inputs again would
-return its empty outputs as a valid 200.
-
 ### 20. A `.ghx` loads on Linux (SELVA FIX)
 
 **Files:** `src/compute.geometry/LinuxGhx.cs` (entire file); `src/compute.geometry/GrasshopperDefinition.cs` —
-`ArchiveFromUrl`, `ArchiveFromXml`; `src/compute.geometry/GrasshopperValidationHelper.cs`
+`ArchiveFromUrl`, `ArchiveFromXml`
 
 On Linux every `.ghx` failed to load, in solves and in `grasshopper/schema` alike, with
 "System.Drawing.Common is not supported on non-Windows platforms": GH_IO decodes the archive's
@@ -391,8 +355,11 @@ Tooling and docs with no upstream counterpart:
   `docker-status.sh`, `start.sh`, `deploy-server.sh`,
   `env-lib.sh` (parses `.env` instead of sourcing it, so `setup/.env` can be a symlink to a file
   shared with other tools), `server-init.sh`, Multipass launchers and guides, `testing/` (startup-timing and comparison
-  scripts), `plugins/`, `.env.example`, `packages.example.json`.
+  scripts), `plugins/`, `.env.example`, `packages.example.json`. The `Dockerfile` sets
+  `RHINO_COMPUTE_MAX_REQUEST_SIZE=314572800` (formerly a source default); unlike the source
+  default, it also raises rhino.compute's own limit.
 - `docs/quick-start-docker.md`, `docs/grasshopper-plugins-not-loading-linux.md`.
+- `CLAUDE.md` — agent instructions for this fork.
 - `.gitattributes`, `.gitignore` additions — local conventions.
 - `src/compute.geometry/compute.geometry.csproj` — `<Version>`, bumped on every upstream merge.
 

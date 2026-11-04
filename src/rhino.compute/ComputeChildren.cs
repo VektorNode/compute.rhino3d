@@ -297,51 +297,36 @@ namespace rhino.compute
             }
         }
 
-        // VEKTORNODE: SELVA FIX — dead-child eviction.
+        // VEKTORNODE: SELVA FIX — dead-child eviction, see FORK_CHANGES §8.
         /// <summary>
-        /// Remove the child on <paramref name="port"/> from the round-robin pool. Called by the
-        /// reverse proxy when establishing a connection to that child fails (connection refused —
-        /// nothing is listening on the port), and by the /child-exiting endpoint when a child
-        /// announces its own idle shutdown. A child whose process is still alive but whose HTTP
-        /// listener has died is invisible to the HasExited check in GetComputeServerBaseUrl, so it
-        /// would otherwise stay in rotation and fail every request routed to it until a manual
-        /// /shutdown-children. Evicting it here lets the normal SpawnCount refill respawn a
-        /// healthy replacement. No-op if the port is not tracked.
+        /// Drops the child on <paramref name="port"/> from the pool after a connection to it failed:
+        /// SelectChild prunes only exited processes, not one alive with a dead listener. It is killed
+        /// unless another request still holds a lease on it (the caller holds one).
         /// </summary>
-        /// <param name="kill">When true (proxy connect-failure path), also Kill() the process in
-        /// case it is alive with a dead listener. When false (/child-exiting path), the child is
-        /// already stopping itself, so we only drop the pool entry and leave it to exit cleanly.</param>
-        public static void EvictChild(int port, bool kill = true)
+        public static void EvictChild(int port)
         {
-            Process toKill = null;
+            Process process;
+            bool inUse;
             lock (lockObject)
             {
-                if (!computeProcesses.Any(t => t.Item2 == port))
+                process = computeProcesses.FirstOrDefault(t => t.Item2 == port)?.Item1;
+                if (process == null)
                     return;
-
-                var kept = new Queue<Tuple<Process, int>>();
-                foreach (var t in computeProcesses)
-                {
-                    if (t.Item2 == port)
-                        toKill = t.Item1;
-                    else
-                        kept.Enqueue(t);
-                }
-                computeProcesses = kept;
+                computeProcesses = new Queue<Tuple<Process, int>>(computeProcesses.Where(t => t.Item2 != port));
+                inUse = activeRequests.TryGetValue(port, out int count) && count > 1;
             }
 
-            Log.Warning("Evicting compute.geometry on port {Port} from the pool (kill={Kill})", port, kill);
-            if (kill && toKill != null)
+            Log.Warning("Evicting compute.geometry on port {Port} from the pool (kill={Kill})", port, !inUse);
+            if (inUse)
+                return;
+            try
             {
-                try
-                {
-                    if (!toKill.HasExited)
-                        toKill.Kill();
-                }
-                catch (Exception ex)
-                {
-                    Log.Debug(ex, "Exception killing evicted compute.geometry on port {Port}", port);
-                }
+                if (!process.HasExited)
+                    process.Kill();
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Exception killing evicted compute.geometry on port {Port}", port);
             }
         }
 

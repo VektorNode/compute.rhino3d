@@ -98,6 +98,10 @@ RUN dotnet restore compute.sln \
 EXPOSE 6500
 EXPOSE 6001
 
+# Selva solve payloads exceed upstream's 50 MB default. Set here rather than in source so the code
+# stays upstream's; `docker run -e` still overrides it.
+ENV RHINO_COMPUTE_MAX_REQUEST_SIZE=314572800
+
 # ============================================================
 # 8. Startup script
 # ============================================================

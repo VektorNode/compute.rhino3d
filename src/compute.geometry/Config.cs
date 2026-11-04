@@ -104,6 +104,7 @@ namespace compute.geometry
         /// </summary>
         public static bool Compression { get; private set; }
 
+        // VEKTORNODE: SELVA — live events, see FORK_CHANGES §11.
         /// <summary>
         /// RHINO_COMPUTE_EVENT_SINK_HOSTS: hosts (comma or semicolon separated, optional
         /// `host:port`) a Selva-family plugin may POST mid-solve events to. The callback URL
@@ -123,6 +124,7 @@ namespace compute.geometry
 
         public static string[] GetDeprecationWarnings() => warnings.ToArray();
 
+        // VEKTORNODE: SELVA — solve timing, see FORK_CHANGES §16.
         /// <summary>
         /// RHINO_COMPUTE_PROFILE_TOP: how many of a solve's slowest Grasshopper objects the
         /// `X-Compute-Profile` response header names. Defaults to 5; 0 leaves the header off.
@@ -149,7 +151,7 @@ namespace compute.geometry
             Urls = GetEnvironmentVariable(RHINO_COMPUTE_URLS, "http://localhost:8081", COMPUTE_BIND_URLS).Split(';');
             ApiKey = GetEnvironmentVariable<string>(RHINO_COMPUTE_KEY, null);
             RequestTimeout = GetEnvironmentVariable<int>(RHINO_COMPUTE_TIMEOUT, 100);
-            MaxRequestSize = GetEnvironmentVariable<long>(RHINO_COMPUTE_MAX_REQUEST_SIZE, 314572800);
+            MaxRequestSize = GetEnvironmentVariable<long>(RHINO_COMPUTE_MAX_REQUEST_SIZE, 52428800);
             BlockPrivateUrls = GetEnvironmentVariable<bool>(RHINO_COMPUTE_BLOCK_PRIVATE_URLS, false);
             CachePhysicalLimitPercent = GetEnvironmentVariable<int>(RHINO_COMPUTE_CACHE_PHYSICAL_LIMIT_PERCENT, 70);
             LogPath = GetEnvironmentVariable(RHINO_COMPUTE_LOG_PATH, Path.Combine(Path.GetTempPath(), "Compute", "Logs"), COMPUTE_LOG_PATH);
@@ -199,6 +201,7 @@ namespace compute.geometry
         const string RHINO_COMPUTE_LOAD_GRASSHOPPER = "RHINO_COMPUTE_LOAD_GRASSHOPPER";
         const string RHINO_COMPUTE_ENABLE_SCRIPTING = "RHINO_COMPUTE_ENABLE_SCRIPTING";
         const string RHINO_COMPUTE_COMPRESSION = "RHINO_COMPUTE_COMPRESSION";
+        // VEKTORNODE: SELVA — §11, §16.
         const string RHINO_COMPUTE_EVENT_SINK_HOSTS = "RHINO_COMPUTE_EVENT_SINK_HOSTS";
         const string RHINO_COMPUTE_PROFILE_TOP = "RHINO_COMPUTE_PROFILE_TOP";
 

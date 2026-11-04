@@ -116,11 +116,6 @@ namespace rhino.compute
             // the catch-all proxy route below so they're not forwarded to a compute.geometry child.
             app.MapPost("/shutdown-children", ShutdownChildrenEndpoint);
             app.MapPost("/recycle-children",  RecycleChildrenEndpoint);
-            // VEKTORNODE: SELVA FIX — dead-child eviction.
-            // Called by a child right before it self-exits on idle timeout, so the parent drops
-            // it from the round-robin pool immediately instead of handing out the dead port on the
-            // next request (the cause of the post-idle "connection refused" bursts).
-            app.MapPost("/child-exiting",     ChildExitingEndpoint);
             app.MapPost("/launch-children",   LaunchChildrenEndpoint);
             app.MapPost("/launch-child",      LaunchChildEndpoint);
 
@@ -182,23 +177,6 @@ namespace rhino.compute
                 shutdown,
                 active = ComputeChildren.CurrentChildCount,
             });
-        }
-
-        // VEKTORNODE: SELVA FIX — dead-child eviction.
-        // POST /child-exiting?port=N — a child announcing it is about to exit on its own (idle
-        // timeout). Evict it from the pool now so the next request doesn't get routed to a port
-        // that is about to stop listening. Fire-and-forget from the child's perspective; we just
-        // ack. Does not respawn — the normal auto-fill on the next request restores SpawnCount.
-        static async Task ChildExitingEndpoint(HttpRequest req, HttpResponse res)
-        {
-            if (!TryParsePortFilter(req, out int? port, out string parseError) || !port.HasValue)
-            {
-                res.StatusCode = 400;
-                await res.WriteAsJsonAsync(new { error = parseError ?? "port query parameter is required." });
-                return;
-            }
-            ComputeChildren.EvictChild(port.Value, kill: false);
-            await res.WriteAsJsonAsync(new { evicted = port.Value, active = ComputeChildren.CurrentChildCount });
         }
 
         // POST /recycle-children — shut down + respawn. No params = all; ?port=N = just that one.
@@ -345,7 +323,7 @@ namespace rhino.compute
             }
         }
 
-        static async Task<HttpResponseMessage> SendProxyRequest(HttpRequest initialRequest, HttpMethod method, string baseurl, System.IO.MemoryStream body)
+        static async Task<HttpResponseMessage> SendProxyRequest(HttpRequest initialRequest, HttpMethod method, string baseurl, System.IO.MemoryStream body) // VEKTORNODE: SELVA FIX — body read by the caller, §8
         {
             string proxyUrl = $"{baseurl}{initialRequest.Path}{initialRequest.QueryString}";
 
@@ -407,7 +385,7 @@ namespace rhino.compute
         // on success so it is preferred for the next round-robin selection.
         private static async Task ReverseProxyHandler(HttpRequest req, HttpResponse res, HttpMethod method)
         {
-            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew(); // VEKTORNODE: SELVA — solve timing
             await AwaitInitTask();
             long initMs = stopwatch.ElapsedMilliseconds;
             string responseString;
@@ -416,6 +394,7 @@ namespace rhino.compute
                 using (new ConcurrentRequestTracker())
                 {
                     // Read in full first, so the timeout covers the child's work and not the client's upload.
+                    // VEKTORNODE: SELVA FIX — read here, not in SendProxyRequest, so a retry re-sends it (§8).
                     System.IO.MemoryStream body = null;
                     if (method == HttpMethod.Post)
                     {
@@ -479,6 +458,9 @@ namespace rhino.compute
                     }
                 }
                 // The child is free once its response is read; a slow client shouldn't hold it.
+                // VEKTORNODE: SELVA FIX — a length, not chunked: Node's client hangs on a chunked 500. See FORK_CHANGES §14.
+                if (!string.IsNullOrEmpty(responseString)) // a 204/304 must not declare a length
+                    res.ContentLength = System.Text.Encoding.UTF8.GetByteCount(responseString);
                 await res.WriteAsync(responseString);
             }
             catch (Exception ex) when (ex is Microsoft.AspNetCore.Connections.ConnectionResetException ||

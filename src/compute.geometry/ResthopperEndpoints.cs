@@ -117,7 +117,8 @@ namespace compute.geometry
                 {
                     while (reader.Read())
                     {
-                        if (reader.TokenType == JsonToken.PropertyName
+                        // Depth 1: a property of the root object, not a nested "errors".
+                        if (reader.TokenType == JsonToken.PropertyName && reader.Depth == 1
                             && string.Equals((string)reader.Value, "errors", StringComparison.OrdinalIgnoreCase))
                         {
                             // Move to the value; a non-empty array means the solve errored.
@@ -270,17 +271,13 @@ namespace compute.geometry
                     ctx.Response.Headers.Append("X-Compute-Profile", definition.ProfileJson(Config.ProfileTop));
                 if (definition.HasErrors)
                     ctx.Response.StatusCode = 500; // internal server error
-
-                // VEKTORNODE: CACHE-ERRORED-SOLVES — an errored solve is not cached unless the
-                // request opts in (definitions that raise GH errors by design but still produce
-                // correct geometry). The HTTP status is unchanged either way.
-                if (input.CacheSolve && (!definition.HasErrors || input.CacheErroredSolves))
+                if (!definition.HasErrors || input.CacheErroredSolves) // VEKTORNODE: CACHE-ERRORED-SOLVES — opt-in, see FORK_CHANGES §5
                 {
-                    Serilog.Log.Debug(
-                        definition.HasErrors
-                            ? "Caching solve results (errored solve, CacheErroredSolves opt-in)"
-                            : "Caching solve results");
-                    DataCache.SetCachedSolveResults(body, returnJson, shared);
+                    if (input.CacheSolve)
+                    {
+                        Serilog.Log.Debug("Caching solve results");
+                        DataCache.SetCachedSolveResults(body, returnJson, shared);
+                    }
                 }
 
                 return returnJson;
@@ -358,13 +355,7 @@ namespace compute.geometry
             if (!string.IsNullOrEmpty(json))
             {
                 ctx.Response.ContentType = "application/json";
-                // VEKTORNODE: SELVA FIX — send the body with a Content-Length header so the
-                // size is known up front. Without it, the response is sent in chunks, which
-                // the Node client fails to read on a 500 error, causing the request to hang
-                // until it times out.
-                var payload = System.Text.Encoding.UTF8.GetBytes(json);
-                ctx.Response.ContentLength = payload.Length;
-                await ctx.Response.Body.WriteAsync(payload, 0, payload.Length);
+                await ctx.Response.WriteAsync(json);
             }
         }
 

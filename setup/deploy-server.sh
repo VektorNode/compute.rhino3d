@@ -23,6 +23,9 @@
 #                    (default: LOCAL_PLUGINS)
 #   DEPLOY_BUILD   - shell command run before the plugins are staged, so they ship freshly
 #                    built, e.g. dotnet build /path/VektorFab.sln -c Release. A failure aborts.
+#   DEPLOY_PACKAGES - the packages.json to ship (default: setup/packages.json), so two
+#                    servers deployed from one checkout can install different Yak packages.
+#                    A relative path is relative to the env file.
 #
 # packages.json: a yak entry with "version": "newest" (prereleases included) or "stable" is
 # resolved here to the exact Yak version for the Dockerfile's Rhino major (needs node), so
@@ -66,6 +69,13 @@ DEPLOY_DIR="$(env_value "$ENV_FILE" DEPLOY_DIR)"; DEPLOY_DIR="${DEPLOY_DIR:-comp
 DEPLOY_PLUGINS="$(env_value "$ENV_FILE" DEPLOY_PLUGINS)"
 [ -n "$DEPLOY_PLUGINS" ] || DEPLOY_PLUGINS="$(env_value "$ENV_FILE" LOCAL_PLUGINS)"
 DEPLOY_BUILD="$(env_value "$ENV_FILE" DEPLOY_BUILD)"
+DEPLOY_PACKAGES="$(env_value "$ENV_FILE" DEPLOY_PACKAGES)"
+if [ -n "$DEPLOY_PACKAGES" ]; then
+    case "$DEPLOY_PACKAGES" in /*|?:*) ;; *) DEPLOY_PACKAGES="$(dirname "$ENV_FILE")/$DEPLOY_PACKAGES" ;; esac
+    [ -f "$DEPLOY_PACKAGES" ] || die "DEPLOY_PACKAGES not found: $DEPLOY_PACKAGES"
+else
+    DEPLOY_PACKAGES="$SCRIPT_DIR/packages.json"
+fi
 DEPLOY_TLS_DOMAIN="$(env_value "$ENV_FILE" DEPLOY_TLS_DOMAIN)"
 DEPLOY_ALLOW_IPS="$(env_value "$ENV_FILE" DEPLOY_ALLOW_IPS)"
 CONTAINER_NAME="$(server_value CONTAINER_NAME)"; CONTAINER_NAME="${CONTAINER_NAME:-rhino-compute-x9}"
@@ -173,11 +183,11 @@ done
 [ -n "$DEPLOY_BUILD" ] \
     || echo "    A build folder holds whatever was last built there; rebuild from the commit shown before deploying."
 
-if [ -f "$SCRIPT_DIR/packages.json" ]; then
+if [ -f "$DEPLOY_PACKAGES" ]; then
     log "Yak packages"
     command -v node >/dev/null || die "node is needed to resolve packages.json."
     rhino_major="$(sed -n 's/^ARG RHINO3D_VERSION=\([0-9]*\).*/\1/p' "$SCRIPT_DIR/Dockerfile")"
-    node "$SCRIPT_DIR/resolve-packages.mjs" "$SCRIPT_DIR/packages.json" "$rhino_major" \
+    node "$SCRIPT_DIR/resolve-packages.mjs" "$DEPLOY_PACKAGES" "$rhino_major" \
         > "$RESOLVED/packages.json" 2> "$RESOLVED/log" \
         || { cat "$RESOLVED/log" >&2; die "could not resolve packages.json against Yak."; }
     cat "$RESOLVED/log"

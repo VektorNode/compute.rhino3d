@@ -21,6 +21,12 @@
 #   DEPLOY_DIR     - checkout on the server, relative to its home (default: compute.rhino3d)
 #   DEPLOY_PLUGINS - comma-separated local plugin build folders to ship
 #                    (default: LOCAL_PLUGINS)
+#   DEPLOY_BUILD   - shell command run before the plugins are staged, so they ship freshly
+#                    built, e.g. dotnet build /path/VektorFab.sln -c Release. A failure aborts.
+#
+# packages.json: a yak entry with "version": "newest" (prereleases included) or "stable" is
+# resolved here to the exact Yak version for the Dockerfile's Rhino major (needs node), so
+# the server installs that version and ~/plugins/DEPLOYED records it.
 #   DEPLOY_TLS_DOMAIN - serve https://<this name> through Caddy with a Let's Encrypt
 #                    certificate. The name must resolve to the server and ports 80
 #                    and 443 must be open to the internet. Compute then listens on
@@ -59,6 +65,7 @@ DEPLOY_HOST="$(env_value "$ENV_FILE" DEPLOY_HOST)"
 DEPLOY_DIR="$(env_value "$ENV_FILE" DEPLOY_DIR)"; DEPLOY_DIR="${DEPLOY_DIR:-compute.rhino3d}"
 DEPLOY_PLUGINS="$(env_value "$ENV_FILE" DEPLOY_PLUGINS)"
 [ -n "$DEPLOY_PLUGINS" ] || DEPLOY_PLUGINS="$(env_value "$ENV_FILE" LOCAL_PLUGINS)"
+DEPLOY_BUILD="$(env_value "$ENV_FILE" DEPLOY_BUILD)"
 DEPLOY_TLS_DOMAIN="$(env_value "$ENV_FILE" DEPLOY_TLS_DOMAIN)"
 DEPLOY_ALLOW_IPS="$(env_value "$ENV_FILE" DEPLOY_ALLOW_IPS)"
 CONTAINER_NAME="$(server_value CONTAINER_NAME)"; CONTAINER_NAME="${CONTAINER_NAME:-rhino-compute-x9}"
@@ -124,9 +131,18 @@ mount_name() {
     echo "$name"
 }
 
+if [ -n "$DEPLOY_BUILD" ]; then
+    log "Building plugins"
+    echo "    $DEPLOY_BUILD"
+    # A locally running Rhino.Compute locks the plugin DLLs; the build then fails with MSB3027.
+    bash -c "$DEPLOY_BUILD" || die "DEPLOY_BUILD failed. Nothing was deployed."
+    ok "built"
+fi
+
 log "Plugins"
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+RESOLVED="$(mktemp -d)"  # packages.json as shipped; apart from STAGE, which becomes ~/plugins
+trap 'rm -rf "$STAGE" "$RESOLVED"' EXIT
 plugin_names=()
 suspect=0
 manifest="deployed $(date -u +%Y-%m-%dT%H:%MZ) from $(hostname | cut -d. -f1), compute $BRANCH ${remote_head:0:7}"$'\n'
@@ -154,7 +170,19 @@ for p in "${_plugin_dirs[@]}"; do
     plugin_names+=("$name")
 done
 [ ${#plugin_names[@]} -gt 0 ] || echo "    (none — set DEPLOY_PLUGINS or LOCAL_PLUGINS)"
-echo "    A build folder holds whatever was last built there; rebuild from the commit shown before deploying."
+[ -n "$DEPLOY_BUILD" ] \
+    || echo "    A build folder holds whatever was last built there; rebuild from the commit shown before deploying."
+
+if [ -f "$SCRIPT_DIR/packages.json" ]; then
+    log "Yak packages"
+    command -v node >/dev/null || die "node is needed to resolve packages.json."
+    rhino_major="$(sed -n 's/^ARG RHINO3D_VERSION=\([0-9]*\).*/\1/p' "$SCRIPT_DIR/Dockerfile")"
+    node "$SCRIPT_DIR/resolve-packages.mjs" "$SCRIPT_DIR/packages.json" "$rhino_major" \
+        > "$RESOLVED/packages.json" 2> "$RESOLVED/log" \
+        || { cat "$RESOLVED/log" >&2; die "could not resolve packages.json against Yak."; }
+    cat "$RESOLVED/log"
+    manifest+="yak:"$'\n'"$(cat "$RESOLVED/log")"$'\n'
+fi
 if [ "$suspect" = "1" ] && [ "$YES" != "1" ]; then
     read -r -p "    A plugin is not from a clean default branch. Deploy anyway? [y/N] " answer
     [ "$answer" = "y" ] || [ "$answer" = "Y" ] || die "aborted."
@@ -196,7 +224,7 @@ ok "checkout at ${remote_head:0:7}"
 
 # -L ships each staged symlink's target; --delete drops plugins no longer deployed.
 sync_dir "$STAGE/" plugins
-[ -f "$SCRIPT_DIR/packages.json" ] && ssh_ "cat > $DEPLOY_DIR/setup/packages.json" < "$SCRIPT_DIR/packages.json"
+[ -f "$RESOLVED/packages.json" ] && ssh_ "cat > $DEPLOY_DIR/setup/packages.json" < "$RESOLVED/packages.json"
 sync_dir "$SCRIPT_DIR/plugins/" "$DEPLOY_DIR/setup/plugins" README.md
 mkdir -p "$SCRIPT_DIR/fonts"
 sync_dir "$SCRIPT_DIR/fonts/" "$DEPLOY_DIR/setup/fonts"

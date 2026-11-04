@@ -54,20 +54,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Load setup/.env if present (RHINO_TOKEN=... etc). Env vars already set in
 # the shell win — .env only fills in what isn't already set.
-if [ -f "$SCRIPT_DIR/.env" ]; then
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT IDLE_SPAN RESTART BIND; do
-        eval "_prior_${var}=\"\${${var}-}\""
-    done
-
-    set -a
-    # shellcheck disable=SC1091
-    source "$SCRIPT_DIR/.env"
-    set +a
-
-    for var in RHINO_TOKEN RHINO_COMPUTE_KEY IMAGE_NAME CONTAINER_NAME PORT CHILD_COUNT REPO_URL BRANCH NO_BUILD LOCAL_PLUGINS PLATFORM CPUS CPUSET MEMORY CACHE_LIMIT_PERCENT IDLE_SPAN RESTART BIND; do
-        eval "if [ -n \"\${_prior_${var}-}\" ]; then ${var}=\"\${_prior_${var}}\"; fi"
-    done
-fi
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/env-lib.sh"
+load_env "$SCRIPT_DIR/.env"
 
 IMAGE_NAME="${IMAGE_NAME:-rhino-compute-x9}"
 CONTAINER_NAME="${CONTAINER_NAME:-rhino-compute-x9}"

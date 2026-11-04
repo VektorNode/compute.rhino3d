@@ -376,8 +376,9 @@ The Windows build is unchanged.
 Tooling and docs with no upstream counterpart:
 
 - `setup/` — Docker/Linux deployment: `Dockerfile`, `.dockerignore`, `docker-launch.{ps1,sh}`,
-  `docker-status.sh`, `start.sh`, `deploy-server.sh` with `.env.server.example`,
-  `server-init.sh`, Multipass launchers and guides, `testing/` (startup-timing and comparison
+  `docker-status.sh`, `start.sh`, `deploy-server.sh`,
+  `env-lib.sh` (parses `.env` instead of sourcing it, so `setup/.env` can be a symlink to a file
+  shared with other tools), `server-init.sh`, Multipass launchers and guides, `testing/` (startup-timing and comparison
   scripts), `plugins/`, `.env.example`, `packages.example.json`, `infrastructure/.gitignore`
   (Terraform state, variables and provider binaries stay local: they hold the Rhino token and
   API key).

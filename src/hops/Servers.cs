@@ -105,6 +105,11 @@ namespace Hops
                             continue;
                         computeServerQueue.Enqueue(new ComputeServer(server));
                     }
+                    // Inside a compute server with no server set, call back into that server
+                    // instead of starting a local rhino.compute.
+                    string parentUrl = ParentServerUrl();
+                    if (computeServerQueue.Count == 0 && parentUrl != null)
+                        computeServerQueue.Enqueue(new ComputeServer(parentUrl));
                     foreach(var item in serverArray)
                     {
                         if (item.IsLocalProcess)
@@ -150,6 +155,20 @@ namespace Hops
             return url;
         }
 
+        // Set by rhino.compute for its compute.geometry children, and by compute.geometry running on its own.
+        static string ParentServerUrl()
+        {
+            if (!Rhino.RhinoApp.IsRunningHeadless)
+                return null;
+            string url = Environment.GetEnvironmentVariable("RHINO_COMPUTE_PARENT_URL");
+            return string.IsNullOrWhiteSpace(url) ? null : url.TrimEnd('/');
+        }
+
+        internal static bool IsParentServer(Uri uri)
+            => uri != null
+                && Uri.TryCreate(ParentServerUrl(), UriKind.Absolute, out Uri parent)
+                && Uri.Compare(uri, parent, UriComponents.SchemeAndServer, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) == 0;
+
         public static void LaunchChildComputeGeometry(int childCount)
         {
             if (childCount < 1)
@@ -157,7 +176,7 @@ namespace Hops
             string baseUrl = GetComputeServerBaseUrl();
             int thisProc = Process.GetCurrentProcess().Id;
             string address = $"{baseUrl}/launch?children={childCount}&parent={thisProc}";
-            RemoteDefinition.HttpClient.GetAsync(address);
+            RemoteDefinition.HttpClientFor(address).GetAsync(address);
         }
 
         const int RhinoComputePort = 6500;

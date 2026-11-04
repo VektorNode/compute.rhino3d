@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -69,11 +69,17 @@ namespace rhino.compute
         /// figure out if they should exit.
         /// </summary>
         /// <returns>
-        /// -1 if a child process has never been called; otherwise
-        /// span in seconds since the last call to a child process
+        /// -1 if a child process has never been called; 0 while a request is in
+        /// progress; otherwise span in seconds since the last call to a child process
         /// </returns>
         public static int IdleSpan()
         {
+            // A request that outlasts the idle span must not make the children shut down under it.
+            lock (lockObject)
+            {
+                if (activeRequests.Count > 0)
+                    return 0;
+            }
             if (lastCall == DateTime.MinValue)
                 return -1;
             var span = DateTime.Now - lastCall;
@@ -92,35 +98,93 @@ namespace rhino.compute
         }
 
         /// <summary>
-        /// Get base url for a compute server. This function may return a
-        /// different string each time it is called as it attempts to provide
-        /// basic round robin scheduling when multiple compute servers are
-        /// found to be available.
+        /// Get base url for a compute server, starting one if none are running.
+        /// See <see cref="TakeChild"/> for which child is chosen.
         /// </summary>
-        /// <returns></returns>
-        public static (string, int) GetComputeServerBaseUrl()
+        public static (string, int) GetComputeServerBaseUrl() => SelectChild(reserve: false);
+
+        /// <summary>
+        /// Choose a child for a request. The request counts against that child until the
+        /// returned lease is disposed, so concurrent requests go to other children.
+        /// </summary>
+        public static ChildLease AcquireChild()
         {
-            // Simple round robin scheduler using a queue of compute.geometry processes
+            var (url, port) = SelectChild(reserve: true);
+            return new ChildLease(url, port);
+        }
+
+        public sealed class ChildLease : IDisposable
+        {
+            bool released;
+
+            public ChildLease(string baseUrl, int port)
+            {
+                BaseUrl = baseUrl;
+                Port = port;
+            }
+
+            public string BaseUrl { get; }
+            public int Port { get; }
+
+            public void Dispose()
+            {
+                if (released)
+                    return;
+                released = true;
+                ReleaseChild(Port);
+            }
+        }
+
+        static void ReleaseChild(int port)
+        {
+            lock (lockObject)
+            {
+                if (!activeRequests.TryGetValue(port, out int count))
+                    return;
+                if (count <= 1)
+                    activeRequests.Remove(port);
+                else
+                    activeRequests[port] = count - 1;
+            }
+        }
+
+        // Called under lockObject. Takes the first idle child in queue order (the child that last
+        // succeeded is at the front), else the one with the fewest requests in progress, and moves
+        // it to the back so a child that fails drops behind the others.
+        static int TakeChild(bool reserve)
+        {
+            Tuple<Process, int> chosen = null;
+            int fewest = int.MaxValue;
+            foreach (var child in computeProcesses)
+            {
+                activeRequests.TryGetValue(child.Item2, out int count);
+                if (count < fewest)
+                {
+                    chosen = child;
+                    fewest = count;
+                    if (count == 0)
+                        break;
+                }
+            }
+            if (chosen == null)
+                return 0;
+
+            computeProcesses = new Queue<Tuple<Process, int>>(computeProcesses.Where(child => child != chosen).Append(chosen));
+            if (reserve)
+                activeRequests[chosen.Item2] = fewest + 1;
+            return chosen.Item2;
+        }
+
+        static (string, int) SelectChild(bool reserve)
+        {
             int activePort = 0;
 
             lock (lockObject)
             {
-                if (computeProcesses.Count > 0)
-                {
-                    Tuple<Process, int> current = computeProcesses.Dequeue();
-                    if (!current.Item1.HasExited)
-                    {
-                        computeProcesses.Enqueue(current);
-                        activePort = current.Item2;
-                    }
-                }
-
-                if (activePort == 0)
-                {
-                    // Prune any dead processes before the bootstrap launch below
-                    var aliveProcesses = computeProcesses.Where(tuple => !tuple.Item1.HasExited).ToList();
-                    computeProcesses = new Queue<Tuple<Process, int>>(aliveProcesses);
-                }
+                // Prune any dead processes; the bootstrap launch below starts one if none are left
+                if (computeProcesses.Any(tuple => tuple.Item1.HasExited))
+                    computeProcesses = new Queue<Tuple<Process, int>>(computeProcesses.Where(tuple => !tuple.Item1.HasExited));
+                activePort = TakeChild(reserve);
             }
 
             if (activePort == 0)
@@ -140,12 +204,7 @@ namespace rhino.compute
                     while (computeProcesses.Count == 0 && pendingSpawnPorts.Count > 0)
                         Monitor.Wait(lockObject, millisecondsTimeout: 1000);
 
-                    if (computeProcesses.Count > 0)
-                    {
-                        Tuple<Process, int> current = computeProcesses.Dequeue();
-                        computeProcesses.Enqueue(current);
-                        activePort = current.Item2;
-                    }
+                    activePort = TakeChild(reserve);
                 }
             }
 
@@ -203,50 +262,34 @@ namespace rhino.compute
             }
         }
 
-        /// <summary>
-        /// Remove the child on <paramref name="port"/> from the round-robin pool. Called by the
-        /// reverse proxy when establishing a connection to that child fails (connection refused —
-        /// nothing is listening on the port), and by the /child-exiting endpoint when a child
-        /// announces its own idle shutdown. A child whose process is still alive but whose HTTP
-        /// listener has died is invisible to the HasExited check in GetComputeServerBaseUrl, so it
-        /// would otherwise stay in rotation and fail every request routed to it until a manual
-        /// /shutdown-children. Evicting it here lets the normal SpawnCount refill respawn a
-        /// healthy replacement. No-op if the port is not tracked.
-        /// </summary>
-        /// <param name="kill">When true (proxy connect-failure path), also Kill() the process in
-        /// case it is alive with a dead listener. When false (/child-exiting path), the child is
-        /// already stopping itself, so we only drop the pool entry and leave it to exit cleanly.</param>
-        public static void EvictChild(int port, bool kill = true)
+        // VEKTORNODE: SELVA FIX — dead-child eviction. The proxy calls this, holding a lease on the
+        // port, when a connection to the child is refused: a child whose listener died while its
+        // process lives passes the HasExited prune and would fail every request routed to it. It is
+        // killed only when no other request is using it; either way the next request refills the pool.
+        public static void EvictChild(int port)
         {
-            Process toKill = null;
+            Process process;
+            bool inUse;
             lock (lockObject)
             {
-                if (!computeProcesses.Any(t => t.Item2 == port))
+                process = computeProcesses.FirstOrDefault(t => t.Item2 == port)?.Item1;
+                if (process == null)
                     return;
-
-                var kept = new Queue<Tuple<Process, int>>();
-                foreach (var t in computeProcesses)
-                {
-                    if (t.Item2 == port)
-                        toKill = t.Item1;
-                    else
-                        kept.Enqueue(t);
-                }
-                computeProcesses = kept;
+                computeProcesses = new Queue<Tuple<Process, int>>(computeProcesses.Where(t => t.Item2 != port));
+                inUse = activeRequests.TryGetValue(port, out int count) && count > 1;
             }
 
-            Log.Warning("Evicting compute.geometry on port {Port} from the pool (kill={Kill})", port, kill);
-            if (kill && toKill != null)
+            Log.Warning("Evicting compute.geometry on port {Port} from the pool", port);
+            if (inUse)
+                return;
+            try
             {
-                try
-                {
-                    if (!toKill.HasExited)
-                        toKill.Kill();
-                }
-                catch (Exception ex)
-                {
-                    Log.Debug(ex, "Exception killing evicted compute.geometry on port {Port}", port);
-                }
+                if (!process.HasExited)
+                    process.Kill();
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Exception killing evicted compute.geometry on port {Port}", port);
             }
         }
 
@@ -300,31 +343,45 @@ namespace rhino.compute
         static void StartChildOnReservedPort(string pathToCompute, int port)
         {
             Process process = null;
-            bool started = false;
+            var startup = ChildStartup.Failed;
+            bool errored = false;
             try
             {
-                started = TryStartChild(pathToCompute, port, out process);
-                if (!started)
+                startup = StartChild(pathToCompute, port, out process);
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception ||
+                                       ex is InvalidOperationException)
+            {
+                errored = true;
+                Log.Error(ex, "Exception while starting compute.geometry on port {Port}", port);
+            }
+            finally
+            {
+                bool started = startup == ChildStartup.Ready;
+                bool cancelled;
+                lock (lockObject)
+                {
+                    pendingSpawnPorts.Remove(port);
+                    pendingSpawnProcesses.Remove(port);
+                    cancelled = cancelledSpawnPorts.Remove(port);
+                    if (started && !cancelled && process != null && !process.HasExited)
+                        computeProcesses.Enqueue(Tuple.Create(process, port));
+                    // Wake any threads waiting in GetComputeServerBaseUrl for this spawn to finish.
+                    Monitor.PulseAll(lockObject);
+                }
+                if (cancelled)
+                {
+                    Log.Information("Cancelled compute.geometry on port {Port}: children were shut down while it was starting", port);
+                    if (process != null)
+                        KillStartingChild(process, port);
+                }
+                else if (startup == ChildStartup.Failed && !errored)
+                {
                     Log.Warning("compute.geometry on port {Port} failed to start within {Timeout} seconds. " +
                                 "A cold server can legitimately need longer than this to load Rhino, Grasshopper " +
                                 "and the compute plug-ins; raise --child-startup-timeout or " +
                                 "RHINO_COMPUTE_CHILD_STARTUP_TIMEOUT if that is the case here.",
                                 port, Config.ChildStartupTimeout);
-            }
-            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception ||
-                                       ex is InvalidOperationException)
-            {
-                Log.Error(ex, "Exception while starting compute.geometry on port {Port}", port);
-            }
-            finally
-            {
-                lock (lockObject)
-                {
-                    pendingSpawnPorts.Remove(port);
-                    if (started && process != null && !process.HasExited)
-                        computeProcesses.Enqueue(Tuple.Create(process, port));
-                    // Wake any threads waiting in GetComputeServerBaseUrl for this spawn to finish.
-                    Monitor.PulseAll(lockObject);
                 }
             }
         }
@@ -355,14 +412,26 @@ namespace rhino.compute
             return path;
         }
 
+        // How a child's startup ended. Unhealthy: its port opened, but Rhino didn't load.
+        enum ChildStartup { Ready, Unhealthy, Failed }
+
         // Shared helper: creates the start info, starts the process on the given port, and waits
-        // for the port to open. Returns true on success, false if the port never opened (timeout).
-        static bool TryStartChild(string pathToCompute, int port, out Process process)
+        // for it to be ready (see WaitForChildProcess).
+        static ChildStartup StartChild(string pathToCompute, int port, out Process process)
         {
             var startInfo = CreateComputeStartInfo(pathToCompute, port);
             process = Process.Start(startInfo);
             if (process != null)
             {
+                bool cancelled;
+                lock (lockObject)
+                {
+                    pendingSpawnProcesses[port] = process;
+                    cancelled = cancelledSpawnPorts.Contains(port);
+                }
+                if (cancelled)
+                    KillStartingChild(process, port);
+
                 // Lines emitted by the child's Serilog (ANSI theme) already begin with an
                 // escape sequence and a "CG {port} [...]" prefix — pass them through verbatim.
                 // Anything else (Grasshopper's raw Console.WriteLine output during plugin load,
@@ -440,34 +509,77 @@ namespace rhino.compute
                 args += $" -rhinosysdir:\"{RhinoSysDir}\"";
             if (ParentPort > 0 && ChildIdleSpan.TotalSeconds > 1.0)
                 args += $" -parentport:{ParentPort} -idlespan:{(int)ChildIdleSpan.TotalSeconds}";
+            // How compute.geometry, and definitions solved in it, reach this server.
+            if (ParentPort > 0)
+                startInfo.EnvironmentVariables["RHINO_COMPUTE_PARENT_URL"] = $"http://localhost:{ParentPort}";
             startInfo.Arguments = args;
             return startInfo;
         }
 
-        // Polls until the child process port is confirmed open, or kills the process after timeout.
-        // Returns true if the port opened within the timeout, false otherwise.
+        // Polls until the child's port is open and its /healthcheck answers 200, or kills the process
+        // after timeout. A child whose Rhino failed to load still opens its port, but answers 500.
         // timeoutSeconds is deliberately required rather than defaulted: the only call site
         // passes Config.ChildStartupTimeout, and a default here would silently reintroduce a
         // hardcoded value for any future caller that forgot to pass one.
-        static bool WaitForChildProcess(Process process, int port, int timeoutSeconds)
+        static ChildStartup WaitForChildProcess(Process process, int port, int timeoutSeconds)
         {
             var start = DateTime.Now;
             while (true)
             {
                 if (process == null || process.HasExited)
-                    return false;
+                    return ChildStartup.Failed;
 
                 if (IsPortOpen(port))
-                    return true;
+                {
+                    int status = HealthStatus(port);
+                    if (status == 200)
+                        return ChildStartup.Ready;
+                    if (status != 0)
+                    {
+                        Log.Error("compute.geometry on port {Port} started, but its /healthcheck answered {Status}, so Rhino most likely " +
+                                  "failed to load (its log has the reason). Stopping it so it isn't sent requests.", port, status);
+                        KillStartingChild(process, port);
+                        return ChildStartup.Unhealthy;
+                    }
+                }
 
                 if ((DateTime.Now - start).TotalSeconds > timeoutSeconds)
                 {
                     try { process.Kill(); } catch (Exception ex) { Log.Debug(ex, "Exception killing timed-out compute.geometry process on port {Port}", port); }
                     process.Dispose();
-                    return false;
+                    return ChildStartup.Failed;
                 }
 
-                Thread.Sleep(1000);
+                Thread.Sleep(100);
+            }
+        }
+
+        static readonly HttpClient healthClient = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+
+        // The child's /healthcheck status code, or 0 when it didn't answer.
+        static int HealthStatus(int port)
+        {
+            try
+            {
+                using var response = healthClient.GetAsync($"http://localhost:{port}/healthcheck").GetAwaiter().GetResult();
+                return (int)response.StatusCode;
+            }
+            catch (Exception ex) when (ex is HttpRequestException || ex is OperationCanceledException)
+            {
+                return 0;
+            }
+        }
+
+        static void KillStartingChild(Process process, int port)
+        {
+            try
+            {
+                if (!process.HasExited)
+                    process.Kill(entireProcessTree: true);
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "Exception killing starting compute.geometry process on port {Port}", port);
             }
         }
 
@@ -497,7 +609,8 @@ namespace rhino.compute
         /// (API key forwarded automatically since children inherit RHINO_COMPUTE_KEY from the
         /// parent's environment, so both ends agree on the key when one is configured). Waits
         /// up to <paramref name="gracefulTimeoutSeconds"/> for each child to exit cleanly,
-        /// then Kill()'s any stragglers as a fallback.
+        /// then Kill()'s any stragglers as a fallback. Unless respawning, children that are still
+        /// starting are cancelled too, so none of them is left running after the call.
         ///
         /// <para>Called by Program.cs on ApplicationStopping (clean parent exit, no respawn),
         /// and by the /shutdown-children and /recycle-children endpoints (with respawn=true for
@@ -516,6 +629,8 @@ namespace rhino.compute
             int gracefulTimeoutSeconds = 3)
         {
             Tuple<Process, int>[] toShutdown;
+            int[] cancelledPorts = Array.Empty<int>();
+            var startingChildren = new List<(Process Process, int Port)>();
             lock (lockObject)
             {
                 if (portFilter.HasValue)
@@ -537,9 +652,26 @@ namespace rhino.compute
                     toShutdown = computeProcesses.ToArray();
                     computeProcesses.Clear();
                 }
+
+                if (!respawn)
+                {
+                    cancelledPorts = pendingSpawnPorts.Where(p => !portFilter.HasValue || p == portFilter.Value).ToArray();
+                    foreach (int port in cancelledPorts)
+                    {
+                        cancelledSpawnPorts.Add(port);
+                        if (pendingSpawnProcesses.TryGetValue(port, out var starting))
+                            startingChildren.Add((starting, port));
+                    }
+                }
+            }
+            if (cancelledPorts.Length > 0)
+            {
+                Log.Information("Cancelling {Count} compute.geometry child process(es) that were still starting", cancelledPorts.Length);
+                foreach (var (starting, port) in startingChildren)
+                    KillStartingChild(starting, port);
             }
             if (toShutdown.Length == 0)
-                return (Array.Empty<int>(), Array.Empty<int>());
+                return (cancelledPorts, Array.Empty<int>());
 
             Log.Information("Shutting down {Count} compute.geometry child process(es)", toShutdown.Length);
 
@@ -612,7 +744,7 @@ namespace rhino.compute
                 spawnedPorts = spawned.ToArray();
             }
 
-            return (shutdownPorts, spawnedPorts);
+            return (shutdownPorts.Concat(cancelledPorts).ToArray(), spawnedPorts);
         }
 
         /// <summary>
@@ -729,7 +861,7 @@ namespace rhino.compute
             {
                 if (!computeProcesses.Any(t => t.Item2 == port))
                     throw new InvalidOperationException(
-                        $"Failed to spawn child on port {port} (startup timed out or process exited).");
+                        $"Failed to spawn child on port {port} (startup timed out, the process exited, or Rhino failed to load).");
             }
             return port;
         }
@@ -746,8 +878,14 @@ namespace rhino.compute
 
         static object lockObject = new object();
         static Queue<Tuple<Process, int>> computeProcesses = new Queue<Tuple<Process, int>>();
+        // Requests in progress per child port. Protected by lockObject.
+        static readonly Dictionary<int, int> activeRequests = new Dictionary<int, int>();
         // Ports for which a child process has been started but has not yet been confirmed
         // ready and added to computeProcesses. Protected by lockObject.
         static readonly HashSet<int> pendingSpawnPorts = new HashSet<int>();
+        // The process started for each pending port, and pending ports whose startup ShutdownChildren
+        // cancelled. Protected by lockObject.
+        static readonly Dictionary<int, Process> pendingSpawnProcesses = new Dictionary<int, Process>();
+        static readonly HashSet<int> cancelledSpawnPorts = new HashSet<int>();
     }
 }

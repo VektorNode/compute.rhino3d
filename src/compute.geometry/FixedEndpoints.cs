@@ -10,8 +10,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using System.Linq;
 using GH_IO.Serialization;
-using Grasshopper.Kernel;
 using Newtonsoft.Json.Linq;
+using Rhino.PlugIns;
 
 namespace compute.geometry
 {
@@ -42,7 +42,7 @@ namespace compute.geometry
             var values = new Dictionary<string, string>
             {
                 { "rhino", Rhino.RhinoApp.Version.ToString() },
-                { "compute", Assembly.GetExecutingAssembly().GetName().Version.ToString() },
+                { "compute", Assembly.GetExecutingAssembly().GetName().Version.ToString() }
             };
             string git_sha = null; // appveyor will replace this
             values.Add("git_sha", git_sha);
@@ -125,7 +125,8 @@ namespace compute.geometry
             ctx.Response.ContentType = "application/json";
             await ctx.Response.WriteAsJsonAsync(ghPluginInfo);
         }
-        
+
+        // ── BEGIN VEKTORNODE: SELVA — schema-extraction endpoints ──
         static async Task GetGrasshopperSchemaInfo(HttpContext ctx)
         {
             ctx.Response.ContentType = "application/json";
@@ -164,7 +165,7 @@ namespace compute.geometry
                     using var mem = new MemoryStream();
                     await stream.CopyToAsync(mem);
 
-                    var archive = GrasshopperValidationHelper.ArchiveFromBytes(mem.ToArray());
+                    var archive = GrasshopperDefinition.ArchiveFromBytes(mem.ToArray());
                     results.Add(ExtractSchemaFromArchive(fileName, archive));
                 }
                 catch (Exception ex)
@@ -214,7 +215,7 @@ namespace compute.geometry
             {
                 try
                 {
-                    var archive = await GrasshopperValidationHelper.ArchiveFromUrlAsync(url);
+                    var archive = GrasshopperDefinition.ArchiveFromUrl(url, out _);
                     results.Add(ExtractSchemaFromArchive(url, archive));
                 }
                 catch (Exception ex)
@@ -268,6 +269,7 @@ namespace compute.geometry
 
             return GrasshopperValidationHelper.SuccessResult(fileName, schemas);
         }
+        // ── END   VEKTORNODE: SELVA — schema-extraction endpoints ──
     }
 }
 

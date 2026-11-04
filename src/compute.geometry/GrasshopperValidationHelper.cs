@@ -1,10 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Net.Http;
 using System.Reflection;
-using System.Threading.Tasks;
 using GH_IO.Serialization;
 using Grasshopper.Kernel;
 using Newtonsoft.Json.Linq;
@@ -27,48 +24,6 @@ namespace compute.geometry
     // type — see IsComponentOfType and GetEmbeddedSchema for why (OBSOLETE_* subclasses).
     internal static class GrasshopperValidationHelper
     {
-        static readonly HttpClient _http = new HttpClient();
-
-        public static async Task<GH_Archive> ArchiveFromUrlAsync(string url)
-        {
-            if (string.IsNullOrWhiteSpace(url))
-                return null;
-
-            if (!url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-            {
-                // Local file path
-                if (!File.Exists(url))
-                    throw new FileNotFoundException($"File not found: {url}");
-                var archive = new GH_Archive();
-                if (archive.ReadFromFile(url))
-                    return archive;
-                return null;
-            }
-
-            var bytes = await _http.GetByteArrayAsync(url);
-            return ArchiveFromBytes(bytes);
-        }
-
-        public static GH_Archive ArchiveFromBytes(byte[] byteArray)
-        {
-            try
-            {
-                var byteArchive = new GH_Archive();
-                if (byteArchive.Deserialize_Binary(byteArray))
-                    return byteArchive;
-            }
-            catch (Exception) { }
-
-            // Encoding.GetString keeps a leading BOM, which Deserialize_Xml rejects as
-            // "Data at the root level is invalid". Grasshopper writes .ghx with one.
-            var xml = System.Text.Encoding.UTF8.GetString(byteArray).TrimStart('﻿');
-            var xmlArchive = new GH_Archive();
-            if (xmlArchive.Deserialize_Xml(xml))
-                return xmlArchive;
-
-            return null;
-        }
-
         public static GH_Document DocumentFromArchive(GH_Archive archive)
         {
             var doc = new GH_Document();
@@ -184,37 +139,6 @@ namespace compute.geometry
         {
             try { return assembly.GetType(fullName); }
             catch { return null; }
-        }
-
-        // Serializes a list of schema parameters (inputs or outputs) into a JArray.
-        // Each item is reflected to extract all simple-value properties (primitives, strings, enums).
-        private static JArray SerializeParamList(System.Collections.IList list)
-        {
-            var arr = new JArray();
-            if (list == null) return arr;
-            foreach (var item in list)
-                if (item != null) arr.Add(SerializeSchemaParam(item));
-            return arr;
-        }
-
-        private static JObject SerializeSchemaParam(object param)
-        {
-            var obj = new JObject();
-            foreach (var prop in param.GetType()
-                                      .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-                                      .Where(p => p.CanRead && p.GetIndexParameters().Length == 0))
-            {
-                try
-                {
-                    var val = prop.GetValue(param);
-                    if (val == null) continue;
-                    var vt = val.GetType();
-                    if (vt.IsPrimitive || vt == typeof(string) || vt.IsEnum)
-                        obj[prop.Name] = JToken.FromObject(val);
-                }
-                catch { /* skip unreadable or unsupported properties */ }
-            }
-            return obj;
         }
 
         public static JObject ErrorResult(string fileName, string message) => new JObject

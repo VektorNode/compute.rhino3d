@@ -507,14 +507,13 @@ namespace compute.geometry
                         object invokeObj = null;
                         object[] invokeParameters = new object[methodParameters.Length];
                         int currentJa = 0;
-                        if (!method.IsStatic)
-                        {
-                            invokeObj = ToObjectHelper(ja[currentJa++], classType, null);
-                        }
-
                         int outParamCount = 0;
                         try
                         {
+                            if (!method.IsStatic)
+                            {
+                                invokeObj = ToObjectHelper(ja[currentJa++], classType, null);
+                            }
                             for (int i = 0; i < methodParameters.Length; i++)
                             {
                                 if (!methodParameters[i].IsOut)
@@ -576,10 +575,12 @@ namespace compute.geometry
                                     outParamCount++;
                             }
                         }
-                        catch (Exception)
+                        catch (Exception ex)
                         {
                             if (methodIndex < (methods.Count() - 1))
                                 continue;
+                            if (BadRequestException.IsBadValue(ex))
+                                throw new BadRequestException($"The arguments don't fit {method.Name}: {ex.Message}", ex);
                             throw;
                         }
                         bool isConst = false;
@@ -778,21 +779,24 @@ namespace compute.geometry
 
     public class GeometryResolver : DefaultContractResolver
     {
-        static int rhinoVersion = 0;
-        static JsonSerializerSettings settings;
+        // One per Rhino version, each built completely before other requests can see it.
+        static readonly System.Collections.Concurrent.ConcurrentDictionary<int, JsonSerializerSettings> settingsByVersion =
+            new System.Collections.Concurrent.ConcurrentDictionary<int, JsonSerializerSettings>();
+
         public static JsonSerializerSettings Settings(int rhinoVersion)
         {
-            if (settings == null || rhinoVersion != GeometryResolver.rhinoVersion)
-            {
-                settings = new JsonSerializerSettings { ContractResolver = new GeometryResolver() };
-                GeometryResolver.rhinoVersion = rhinoVersion;
-                // return V7 ON_Objects for now
-                var options = new Rhino.FileIO.SerializationOptions();
-                options.RhinoVersion = rhinoVersion;
-                options.WriteUserData = true;
-                settings.Context = new System.Runtime.Serialization.StreamingContext(System.Runtime.Serialization.StreamingContextStates.All, options);
-                settings.Converters.Add(new ArchivableDictionaryResolver());
-            }
+            return settingsByVersion.GetOrAdd(rhinoVersion, CreateSettings);
+        }
+
+        static JsonSerializerSettings CreateSettings(int rhinoVersion)
+        {
+            var settings = new JsonSerializerSettings { ContractResolver = new GeometryResolver() };
+            // return V7 ON_Objects for now
+            var options = new Rhino.FileIO.SerializationOptions();
+            options.RhinoVersion = rhinoVersion;
+            options.WriteUserData = true;
+            settings.Context = new System.Runtime.Serialization.StreamingContext(System.Runtime.Serialization.StreamingContextStates.All, options);
+            settings.Converters.Add(new ArchivableDictionaryResolver());
             return settings;
         }
 

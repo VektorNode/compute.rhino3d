@@ -105,6 +105,14 @@ namespace compute.geometry
             return null;
         }
 
+        // Only a definition this process has already loaded; unlike GetCachedDefinition, never reads the cache directory.
+        public static GrasshopperDefinition GetLoadedDefinition(string key)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                return null;
+            return (definitionCache.Get(key) as CachedDefinition)?.Definition;
+        }
+
         public static GrasshopperDefinition GetCachedDefinition(string key)
         {
             if (string.IsNullOrWhiteSpace(key))
@@ -146,7 +154,9 @@ namespace compute.geometry
                 Definition = definition,
                 WatchedFileRuntimeSerialNumber = GrasshopperDefinition.WatchedFileRuntimeSerialNumber
             };
-            definitionCache.Set(key, cachedef, CachePolicy);
+            // Setting the cached instance again would retire it.
+            if (!ReferenceEquals((definitionCache.Get(key) as CachedDefinition)?.Definition, definition))
+                definitionCache.Set(key, cachedef, DefinitionPolicy);
 
             if (!string.IsNullOrWhiteSpace(data))
             {
@@ -262,6 +272,12 @@ namespace compute.geometry
             return null;
         }
 
+        // A definition replaced, removed after its file changed, or evicted is released, as nothing else would dispose it.
+        private static System.Runtime.Caching.CacheItemPolicy DefinitionPolicy => new System.Runtime.Caching.CacheItemPolicy
+        {
+            RemovedCallback = args => (args.CacheItem.Value as CachedDefinition)?.Definition?.Retire()
+        };
+
         private static System.Runtime.Caching.CacheItemPolicy CachePolicy
         {
             get
@@ -306,18 +322,12 @@ namespace compute.geometry
         /// definition cache, since active clients may hold Pointer references to entries
         /// there. Returns the number of items removed. Exposed via the POST /cache/purge
         /// endpoint for operator-driven cleanup when host memory pressure is observed.
-        ///
-        /// Enumerates and Remove()s every key explicitly rather than calling Trim(100):
-        /// MemoryCache.Trim is best-effort (it evicts by an internal heuristic and may leave
-        /// items behind), so it cannot honor the "purges every entry" contract. Explicit
-        /// removal also lets us dispose the native Rhino geometry held by URL-data entries —
-        /// a Tuple&lt;JToken, object&gt; whose Item2 may be a GeometryBase (see GetCachedItem).
-        /// GeometryBase wraps unmanaged C++ memory; dropping the managed reference alone leaks
-        /// it until finalization, which defeats the memory-relief purpose of this endpoint.
         /// </summary>
         public static long PurgeSolveResults()
         {
-            // Snapshot keys first: removing during the cache's own enumeration is unsafe.
+            // VEKTORNODE: SELVA FIX — removes every key: Trim(100) is best-effort and may leave
+            // entries behind. Payloads are not disposed; concurrent solves may still hold copies of
+            // cached geometry.
             var keys = new List<string>();
             foreach (var kvp in resultsCache)
                 keys.Add(kvp.Key);
@@ -325,18 +335,8 @@ namespace compute.geometry
             long removed = 0;
             foreach (var key in keys)
             {
-                var entry = resultsCache.Remove(key);
-                if (entry == null)
-                    continue; // already evicted by LRU/another purge between snapshot and removal
-                removed++;
-
-                // URL-data entries hold a (JToken, object) tuple whose object may be native
-                // Rhino geometry; dispose it so the purge actually frees the unmanaged memory.
-                if (entry is Tuple<JToken, object> tuple && tuple.Item2 is IDisposable disposable)
-                {
-                    try { disposable.Dispose(); }
-                    catch (Exception ex) { Log.Warning(ex, "Exception disposing cached geometry for key {Key}", key); }
-                }
+                if (resultsCache.Remove(key) != null)
+                    removed++;
             }
             return removed;
         }

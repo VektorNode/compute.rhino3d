@@ -38,100 +38,102 @@ Tags used:
 
 ## Changes
 
-### 1. Contextual-geometry struct deserialization (SELVA FIX)
-**File:** `src/compute.geometry/GrasshopperDefinition.cs` — `DeserializeGeometry` + `TryDeserializeStruct`
-**Branch:** `fix/contextual-geometry-struct-deserialization`
+### 2. Proxy forwards request bodies as received (SELVA FIX)
+**File:** `src/rhino.compute/ReverseProxy.cs` — `SendProxyRequest`, `ProxyRequest`
 
-Upstream `DeserializeGeometry` assumed geometry inputs always arrive as a Rhino **archive**
-dictionary (`{version, archive3dm, ...}`) and called `CommonObject.FromJSON` only. But struct
-geometry — **Circle, Arc, Line** — has no archive form; our own output serializer emits it as
-**property JSON** (`{"Radius":…,"Plane":…,…}`), which `FromJSON` cannot rehydrate → it returned
-null → zero geometry / failed solve (e.g. a `Get Geometry` input fed a Circle).
-
-Fix: try the archive shape first, then fall back to coercing known curve-like structs to a
-`Curve` (`Circle`/`Arc` → `ArcCurve`, `Line` → `LineCurve`). Mirrors the existing
-`DeserializeCurve` try-then-fallback pattern. **Input-side only** — the output serializer is
-left unchanged so consumers that already parse the struct property JSON keep working.
-To cover more structs later (Rectangle3d, Box, …) add a line in `DeserializeGeometry`.
-
-### 2. Multipart proxy passthrough (SELVA FIX)
-**File:** `src/rhino.compute/ReverseProxy.cs` (~L312)
-
-Upstream read every POST body as a string and re-sent it as `application/json`, destroying the
-multipart boundary — so `grasshopper/validate` and other file uploads broke behind IIS. Fix:
-detect `multipart/form-data` and stream the body through as-is, preserving boundary + binary
-content and forwarding `Content-Length`.
+Upstream read every POST body as a string and re-sent it as `application/json`, destroying a
+multipart boundary, so file uploads (`POST grasshopper/schema`, §3) broke behind the proxy. The
+body is now read once in `ProxyRequest` as bytes (so a §8 retry re-sends the same bytes) and
+forwarded with the caller's `Content-Type`, `application/json` when it sent none, as upstream 9.x
+does. It is read from `Body`, not `BodyReader`: with upstream's gzip request decompression on,
+only `Body` is the decompressed stream.
 
 ### 3. Schema-extraction endpoints (SELVA)
-**Files:** `src/compute.geometry/FixedEndpoints.cs` (~L27), `src/compute.geometry/GrasshopperValidationHelper.cs` (entire file)
+**Files:** `src/compute.geometry/FixedEndpoints.cs`, `src/compute.geometry/GrasshopperValidationHelper.cs` (entire file),
+`src/compute.geometry/GrasshopperDefinition.cs` (`ArchiveFromBytes` made `internal`)
 
-Adds the `grasshopper/schema` family of endpoints (definition IO + validation) used by Selva to
-introspect a definition's inputs/outputs. Not present in upstream/8.x.
-
-### 4. Headless doc creation default ON (SELVA)
-**File:** `src/compute.geometry/Config.cs` (~L110)
-
-Default for headless Rhino document creation flipped to **on** (upstream default is `false`).
+Adds the `grasshopper/schema` family of endpoints used by Selva to read the UI Builder schema
+embedded in a definition. Not present in upstream/8.x. Definitions are loaded with upstream's
+`ArchiveFromUrl` / `ArchiveFromBytes`, so URL fetches keep `UrlGuard`, `BLOCK_PRIVATE_URLS` and the
+`MaxRequestSize` cap.
 
 ### 5. Parameter-Id threading (PARAM-ID)
-**Files:** `src/compute.geometry/GrasshopperDefinition.cs` (~L625), `src/compute.geometry/IO/Schema.cs` (L68, L131)
+**Files:** `src/compute.geometry/GrasshopperDefinition.cs` (`OutputId`, `SerializeDataTree`, `GetInputsAndOutputs`),
+`src/compute.geometry/IO/Schema.cs` (`ResthopperObject.Id`, `IoParamSchema.Id`)
 
-Every emitted `ResthopperObject` is tagged with its source Grasshopper parameter's Instance Guid
-(`ResthopperObject.Id` / `IoParamSchema.Id`) so the client can demux outputs by parameter.
+Every emitted `ResthopperObject` and every `/io` entry carries an Id so the client can demux
+outputs. An input's Id is its param; an output's Id is the param's top-level object
+(`OutputId`): the Context Bake component for a baked output, which is what the Selva client
+matches `schema.outputs[].id` on, or the param itself when it floats in an `RH_OUT` group
+(`Attributes.Parent` is null there, which used to throw).
 
 ### 6. Extra IO handlers + metadata (IO-HANDLERS)
-**Files:** `src/compute.geometry/GrasshopperDefinition.cs` (~L719, Color output), `src/compute.geometry/IO/Schema.cs` (L84)
+**Files:** `src/compute.geometry/GrasshopperDefinition.cs` (`SetInputs` default arm, `AcceptsTextTree`,
+`AssignViaSetValues`, the `GH_Colour` output arm, `InputGroup.GetDefault/GetGroupName/GetValues`),
+`src/compute.geometry/IO/Schema.cs` (`GroupName`, `Values`)
 
-Additional output type handler(s) (e.g. Color) and extra input metadata (UI grouping +
-enumerated values) carried on the schema. Not in upstream/8.x.
+- **Contextual inputs of other types.** Upstream drops a contextual param whose TypeName it does
+  not list. One whose `AssignContextualDataTree` takes `DataTree<GH_String>` now gets its values
+  as text and parses them itself (Selva's Color, File, Image, ValueList), so a new type needs no
+  fork change. Older Selva value lists without that overload get a flat string list through
+  `SetValues` (deprecated).
+- **Color output.** `GH_Colour` is serialized; upstream skips it.
+- **Custom defaults.** `/io` reports a contextual param's `GetDefaultValue()` (found by reflection)
+  when it has one; upstream reports the collected data tree, which is empty for these params.
+- **Input metadata.** `/io` inputs carry `groupName` (the nested named groups around the param,
+  `RH_IN` groups excluded, joined with `::`) and `values` (a contextual param's `Values`
+  dictionary) for Selva's UI.
 
-### 7. Selva serializable-goo SDK seam (SELVA)
-**File:** `src/compute.geometry/GrasshopperDefinition.cs` (~L641, and a DEPRECATED block ~L659)
+### 7. Selva serializable-goo SDK seam (IO-HANDLERS)
+**File:** `src/compute.geometry/GrasshopperDefinition.cs` — arms in `SerializeDataTree`'s output
+switch, helpers after `LogRuntimeMessages`
 
-Any Goo implementing `ISelvaSerializableGoo` (matched by interface name) owns its own wire
-format. The block at ~L659 is marked **DEPRECATED — delete in a future major** (legacy
-serialization of older Selva output Goos).
+Any Goo implementing `ISelvaSerializableGoo` (matched by interface name) owns its own wire format.
+A second arm, marked **DEPRECATED — delete in a future major**, serializes older Selva output Goos
+by type name. Both are arms of upstream's switch, so its loop body is unchanged apart from tagging
+the §5 Id once after it.
 
 ### 8. Dead-child eviction + proxy retry (SELVA FIX)
 **Files:** `src/rhino.compute/ComputeChildren.cs` (`EvictChild`), `src/rhino.compute/ReverseProxy.cs`
-(`/child-exiting` endpoint, retry loop in `ProxyRequest`), `src/compute.geometry/Shutdown.cs`
-(`NotifyParentExiting`)
+(retry loop in `ProxyRequest`)
 
-A child that had self-exited on idle timeout stayed in the round-robin pool, so every request
-routed to it failed with "connection refused" until a manual `/shutdown-children`. Three parts:
-a child POSTs `/child-exiting` just before it stops listening; the parent evicts that port from
-the pool; and the proxy evicts-and-retries on `HttpRequestError.ConnectionError`. The retry only
-fires when the connection was never established, so no solve is ever duplicated.
+A child can idle-exit, or lose its listener while its process lives, just as a request picks it;
+the request then fails with "connection refused". Upstream (8.x, Oct 2026) narrowed this
+(startup health check, exited processes pruned on every pick, `IdleSpan` 0 while a request is in
+progress) but a live process with a dead listener passes the prune. The proxy now
+evicts-and-retries on `HttpRequestError.ConnectionError` only: the connection was never
+established, so no solve is ever duplicated. Each attempt holds upstream's `ChildLease`.
+`EvictChild` kills the process only when no other request holds a lease on it; otherwise it only
+leaves the pool.
 
 Also logs the child's response body on any non-success status, so 500s from compute.geometry are
 diagnosable from the parent log rather than only forwarded to the caller.
 
-### 9. Solve-result cache purge frees native geometry (SELVA FIX)
+### 9. Solve-result cache purge removes every entry (SELVA FIX)
 **File:** `src/compute.geometry/DataCache.cs` — `PurgeSolveResults`
 
-`resultsCache.Trim(100)` is best-effort (it may leave entries behind) and drops only the managed
-reference. URL-data entries hold a `Tuple<JToken, object>` whose `Item2` may be a `GeometryBase`
-wrapping unmanaged C++ memory, so the purge did not actually relieve memory pressure. Now
-enumerates and removes every key explicitly and disposes any `IDisposable` payload.
+`resultsCache.Trim(100)` is best-effort and may leave entries behind, so `POST /cache/purge` did
+not reliably empty the cache. Every key is now removed explicitly. Payloads are not disposed: a
+concurrent solve may still hold a shallow duplicate of cached geometry.
 
 ### 10. Errored-solve caching, opt-in (CACHE-ERRORED-SOLVES)
 **Files:** `src/compute.geometry/IO/Schema.cs`, `src/compute.geometry/ResthopperEndpoints.cs`
 
-By default an errored solve is not served from cache; this adds the opt-in flag plus the
-detection of whether a cached solve-result JSON came from an errored-but-completed solve.
+Upstream never caches an errored solve. Many definitions raise Grasshopper errors by design while
+still producing correct geometry, so `cacheerroredsolves: true` (with `cachesolve`) caches them
+too. The status stays 500, and a cache hit returns 500 as well when the cached body's top-level
+`errors` array is non-empty (`CachedResultHasErrors`), so a hit and a miss answer alike.
 
 ### 11. Stable error code on 500s (SELVA)
-**File:** `src/compute.geometry/Startup.cs`
+**Files:** `src/compute.geometry/Startup.cs`, `src/compute.geometry/ResthopperEndpoints.cs` (`DefinitionNotCachedException`)
 
 Adds a machine-readable `code` to the error body in **both** debug and production. The human
 `message` is scrubbed in prod, so the code is the only thing a client can classify on. A
-stale-pointer cache miss surfaces as `definition_not_cached`, which the `@selvajs/compute`
-client uses to transparently re-upload the definition.
-
-### 12. Larger default max request size (SELVA)
-**File:** `src/compute.geometry/Config.cs`
-
-`RHINO_COMPUTE_MAX_REQUEST_SIZE` default raised from 50 MB to 300 MB.
+stale-pointer cache miss (a `pointer` that no longer resolves and no `algo`) surfaces as a 500
+with `definition_not_cached`, which the `@selvajs/compute` client uses to transparently re-upload
+the definition; it is thrown before upstream's `BadRequestException` for the same case, so the
+client re-uploads instead of getting a 400. We also add `code: "bad_request"` to upstream's 400
+body in the same handler.
 
 ### 13. Live-event callback target as document constants (SELVA)
 **Files:** `src/compute.geometry/IO/Schema.cs` (`SelvaEventTarget`, `Schema.SelvaEvents`),
@@ -151,7 +153,8 @@ Two rules carry the safety:
 
 - The constants are defined on **every** request, as empty strings when the block is absent.
   Cached definitions are live `GH_Document`s reused across requests; a leftover constant would
-  send one caller's events to another caller's callback.
+  send one caller's events to another caller's callback. Since upstream's `CheckOut`, a concurrent
+  solve may run on a fresh copy; the constants are set on whichever instance actually solves.
 - The URL's host must be in `RHINO_COMPUTE_EVENT_SINK_HOSTS`, which defaults to loopback
   (`localhost,127.0.0.1,[::1]`) and nothing else. A same-machine Selva server therefore works
   out of the box, while any sink that is not this host — a LAN address included — stays denied
@@ -165,8 +168,8 @@ Two rules carry the safety:
 Upstream only collects `GH_RuntimeMessageLevel.Warning` into the response's `warnings[]` when
 `Config.Debug` is on, so a production server never reports a warning at all. Selva shows
 warnings to the user and lets them decide whether to trust the result, which is meaningless if
-the array is always empty. Warnings are now collected unconditionally; the Serilog line for them
-stays behind `Debug` so production logs are not flooded. Remarks are unchanged (log only).
+the array is always empty. Outside Debug, warnings are added to the response in a separate block
+ahead of upstream's, which is left unchanged. Remarks are unchanged (log only).
 
 ---
 
@@ -185,7 +188,7 @@ Compute never interprets the messages; the plugin decides.
 - `SelvaOutcome` is defined empty on **every** request, like the #13 constants, so a cached
   document cannot return the previous solve's verdict.
 - When the outcome says `blocked` or `aborted`, `values` is returned empty and the
-  "No outputs found" check is skipped: the client discards those outputs, and serializing them
+  empty-outputs check is skipped: the client discards those outputs, and serializing them
   cost megabytes of display data for nothing. `errors`/`warnings` and the HTTP status are
   unchanged, so a client that ignores `selva` still sees the markers.
 - No Selva plugin, an older one, or a definition without a Selva component: no constant is
@@ -203,7 +206,33 @@ itself (`{"process":"powder",…}`, vektor-fab's `Abschlüsse`), so they always 
 breaks; `\\` and `\n` change meaning. A value that parses as a JSON object or array is now passed
 through unchanged. A JSON string literal still unwraps as before; anything else (an escaped,
 unquoted payload that is not valid JSON) still goes through `Regex.Unescape`.
-Applies to `9.x.selva` too; not yet ported.
+Same as `9.x.selva` §17.
+
+---
+
+### 17. Proxy answers carry a Content-Length (SELVA FIX)
+**File:** `src/rhino.compute/ReverseProxy.cs` — end of `ProxyRequest`
+
+Upstream writes the child's answer with `WriteAsync`, so an answer that is not gzipped goes out
+chunked. The Node client fails to read a chunked 500 and hangs until its timeout. The proxy sets
+`ContentLength` before writing; when it gzips, upstream's compression middleware replaces it with
+the compressed length.
+
+### 18. Undo recording off on the headless doc (SELVA FIX)
+**File:** `src/compute.geometry/ResthopperEndpoints.cs` — `GrasshopperSolveHelper`
+
+Only when `RHINO_COMPUTE_CREATE_HEADLESS_DOC` is on (the Selva setup). With an active doc,
+`GH_Document.NewSolution` calls `RhinoDoc.BeginUndoRecord`; nothing ever undoes on a server, and
+the recorder retains every solve's state (on Linux it also kills the child). Undo is turned off on
+the document the solve creates. Same as `9.x.selva` §6.
+
+### 19. Idle shutdown on time (SELVA FIX)
+**File:** `src/compute.geometry/Shutdown.cs` — `TimerTask`
+
+Upstream asks the parent for its idle time once per `idlespan`, so a child outlives the span by
+up to a whole span, and core-hour billing runs for all of it: a 5-minute span billed 5–10. The
+child now asks at least every `MaxSpanCheckSeconds` (30), so it exits within 30 s of the span.
+Same as `9.x.selva` §15.
 
 ## Non-source divergence
 
@@ -212,9 +241,14 @@ Repo/tooling files with no upstream counterpart, or deliberately changed:
 - `.editorconfig`, `.gitattributes`, `.vscode/settings.json`, `.gitignore` additions — local
   conventions.
 - `.github/workflows/workflow_ci.yml` — artifact upload gated on `8.x.selva` instead of `8.x`.
-- `script/update_compute_server/` — Selva deployment script + README.
+- `script/production/module_update_compute.ps1` — `-Repository`/`-Branch` parameters (defaults
+  are upstream's) so upstream's updater deploys `8.x.selva`. Replaced our own 1000-line updater.
+- `script/update_compute_server/README.md` — Selva setup/update runbook, including the env vars
+  that replaced former source defaults: `RHINO_COMPUTE_CREATE_HEADLESS_DOC=true` and
+  `RHINO_COMPUTE_MAX_REQUEST_SIZE=314572800`.
 - `TROUBLESHOOTING-DUPLICATE-LANGUAGE.md` — runbook for the RhinoCode duplicate-language 500.
 - `src/compute.geometry/compute.geometry.csproj` — `<Version>`.
+- `CLAUDE.md` — agent instructions for this fork.
 
 ---
 

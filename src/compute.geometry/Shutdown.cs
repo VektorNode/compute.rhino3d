@@ -60,6 +60,7 @@ namespace compute.geometry
 
         static System.Net.Http.HttpClient httpClient;
         static DateTime lastSpanCheck = DateTime.Now;
+        const int MaxSpanCheckSeconds = 30; // VEKTORNODE: SELVA FIX — idle shutdown on time
 
         private async static void TimerTask(object timerState)
         {
@@ -79,9 +80,11 @@ namespace compute.geometry
             {
                 // Don't check the server every timer tick. Just check when we start approaching
                 // what we think is our span limit.
+                // VEKTORNODE: SELVA FIX — and at least every MaxSpanCheckSeconds: with one check per
+                // span a child can outlive the span by up to a whole span, and that time is billed.
                 var shouldCheckSpan = DateTime.Now - lastSpanCheck;
                 //Serilog.Log.Debug($"Idle span value is {idleSpan}. Elapsed time {shouldCheckSpan.TotalSeconds} seconds. Last span check {lastSpanCheck.ToLocalTime()}.");
-                if (shouldCheckSpan.TotalSeconds > idleSpan)
+                if (shouldCheckSpan.TotalSeconds > Math.Min(idleSpan, MaxSpanCheckSeconds))
                 {
                     if (httpClient == null)
                         httpClient = new System.Net.Http.HttpClient();
@@ -123,43 +126,9 @@ namespace compute.geometry
                 Serilog.Log.Debug("Shutting down child process");
                 var elapsedTime = DateTime.Now - startTime;
                 Serilog.Log.Information("Total elapsed time for child process is " + string.Format("{0:D2} days, {1:D2} hrs, {2:D2} mins, {3:D2} secs", elapsedTime.Days, elapsedTime.Hours, elapsedTime.Minutes, elapsedTime.Seconds));
-
-                // Tell the parent we're leaving so it drops us from the round-robin pool now,
-                // rather than discovering the dead port on the next client request (which produced
-                // the post-idle "connection refused" bursts). Best-effort: if the parent is gone or
-                // unreachable, we still proceed to stop.
-                await NotifyParentExiting();
-
                 var app = timerState as IHost;
                 if (app != null)
                     await app.StopAsync();
-            }
-        }
-
-        // Best-effort POST to the parent's /child-exiting endpoint with our own port so the parent
-        // evicts us from the pool before we stop listening. Swallows all errors — this is a
-        // courtesy notification and must never block or fail the shutdown.
-        private static async System.Threading.Tasks.Task NotifyParentExiting()
-        {
-            if (parentPort <= 0)
-                return;
-            int myPort = Config.LocalhostPort;
-            if (myPort <= 0)
-                return;
-            try
-            {
-                if (httpClient == null)
-                    httpClient = new System.Net.Http.HttpClient();
-                if (!String.IsNullOrEmpty(Config.ApiKey) && !httpClient.DefaultRequestHeaders.Contains("RhinoComputeKey"))
-                    httpClient.DefaultRequestHeaders.Add("RhinoComputeKey", Config.ApiKey);
-                string url = $"http://localhost:{parentPort}/child-exiting?port={myPort}";
-                Serilog.Log.Debug($"Notifying parent of shutdown at {url}");
-                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(2));
-                await httpClient.PostAsync(url, null, cts.Token);
-            }
-            catch (Exception)
-            {
-                Serilog.Log.Debug("Failed to notify parent of child shutdown; parent will evict on next request");
             }
         }
     }

@@ -49,6 +49,13 @@ Desktop translates them; the container side stays POSIX either way.
 
 Values already set in your shell environment take priority over `.env`.
 
+`ENV_FILE=/path/to/.env ./deploy-server.sh` (also `docker-launch.sh`, `docker-status.sh`) reads that
+file instead of `setup/.env`, e.g. a project that deploys its own server.
+
+`.env` may be a symlink to an env file shared with other projects: only the
+variables in `COMPUTE_ENV_VARS` ([env-lib.sh](env-lib.sh)) are read, the file
+is parsed, never sourced, and lines of other tools are ignored.
+
 See the script header for env vars (`PORT`, `CHILD_COUNT`, `IMAGE_NAME`,
 `REPO_URL`, `BRANCH`, `NO_BUILD`, `PLATFORM`). Re-running it rebuilds the
 image and replaces the running container. It waits for `/healthcheck` to
@@ -144,12 +151,12 @@ numbers with `./docker-status.sh` after a day of use and adjust. Lower
 `CACHE_LIMIT_PERCENT` (e.g. `60`) if children get killed at the cap.
 
 ```bash
-# setup/.env on the server
+# setup/.env, SERVER_ lines apply to ./deploy-server.sh only
 RHINO_TOKEN=...
-RHINO_COMPUTE_KEY=...          # the server is on the network: require the key
-CHILD_COUNT=6
-MEMORY=14g
-CACHE_LIMIT_PERCENT=60
+SERVER_RHINO_COMPUTE_KEY=...   # the server is on the network: require the key
+SERVER_CHILD_COUNT=6
+SERVER_MEMORY=14g
+SERVER_CACHE_LIMIT_PERCENT=60
 ```
 
 The container starts with `--restart unless-stopped` (override with
@@ -171,7 +178,7 @@ Firewall): Docker's published ports bypass `ufw`.
 `./deploy-server.sh` deploys from your machine to any Ubuntu or Debian host you can
 reach over SSH as a user with passwordless sudo, x86-64 for current Rhino builds. How
 the host is created is up to you; it needs nothing installed. The script is configured
-by `setup/.env.server` (template [.env.server.example](.env.server.example)). It:
+by the `DEPLOY_*` and `SERVER_*` lines in `setup/.env` (template [.env.example](.env.example)). It:
 
 1. Refuses to run unless `setup/` and `src/` are committed and the branch is pushed:
    the server builds the image from GitHub.
@@ -180,9 +187,10 @@ by `setup/.env.server` (template [.env.server.example](.env.server.example)). It
 3. Runs [server-init.sh](server-init.sh) with sudo whenever it changed since it last ran
    there: Docker with log rotation, git, rsync, curl and jq, automatic security updates,
    and key-only SSH. It also works as a cloud's first-boot script.
-4. Syncs the plugin builds (`LOCAL_PLUGINS` from `setup/.env` unless `DEPLOY_PLUGINS`
+4. Syncs the plugin builds (`LOCAL_PLUGINS` unless `DEPLOY_PLUGINS`
    is set), `packages.json`, `setup/plugins/` and `setup/fonts/`, and writes the
-   server's `setup/.env` from `.env.server`.
+   server's `setup/.env`: each variable in `COMPUTE_ENV_VARS` ([env-lib.sh](env-lib.sh)),
+   taking `SERVER_<NAME>` over `<NAME>` when both are set.
 5. Runs `docker-launch.sh` on the server, waits for `/healthcheck`, and prints
    `docker-status.sh`. A failed image build leaves the running container alone.
 
@@ -193,13 +201,13 @@ by `setup/.env.server` (template [.env.server.example](.env.server.example)). It
 | ---------------------------------------- | ------------------------------------- |
 | Compute source, `start.sh`, `Dockerfile` | push, then `./deploy-server.sh`       |
 | A plugin                                 | rebuild it, then `./deploy-server.sh` |
-| `packages.json` or `.env.server`         | `./deploy-server.sh`                  |
+| `packages.json` or `.env`                | `./deploy-server.sh`                  |
 
 ### HTTPS
 
 The `RhinoComputeKey` is the only thing between the internet and your Rhino bill, and
 plain HTTP sends it in clear text with every request. To reach the server from
-anywhere, set `DEPLOY_TLS_DOMAIN` in `.env.server` to a name that resolves to the
+anywhere, set `DEPLOY_TLS_DOMAIN` in `.env` to a name that resolves to the
 server, open ports 80 and 443 to the internet, and deploy: a Caddy container then
 serves `https://<name>` with a Let's Encrypt certificate and HSTS, and forwards to
 Compute, which then listens on the server's localhost only. Without a DNS name of your
@@ -217,8 +225,8 @@ them again; the machine itself is billed by its host whether busy or not.
 
 Every request a child answers resets that clock: `/healthcheck`, `/version` and
 `/plugins/...` as well as solves. A monitor that probes one of them keeps Rhino
-billing around the clock. Probe `/activechildren?initialize=false` instead, which
-the parent answers without waking a child.
+billing around the clock. Probe `/activechildren` instead: the parent answers it
+without waking or spawning a child.
 
 ## Checking Status
 

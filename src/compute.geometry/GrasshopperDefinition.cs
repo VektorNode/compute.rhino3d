@@ -3,7 +3,6 @@ using System.IO;
 using System.Threading;
 using System.Net;
 using System.Collections.Generic;
-using System.Drawing;
 
 using Rhino.Geometry;
 
@@ -130,7 +129,7 @@ namespace compute.geometry
                 return null;
 
             var rc = Construct(archive);
-            if (rc != null)
+            if (rc!=null)
             {
                 rc.sourceBytes = contents;
                 rc.CacheKey = cacheKey;
@@ -151,7 +150,7 @@ namespace compute.geometry
         private static GrasshopperDefinition Construct(Guid componentId)
         {
             var component = Grasshopper.Instances.ComponentServer.EmitObject(componentId) as GH_Component;
-            if (component == null)
+            if (component==null)
                 return null;
 
             var definition = new GH_Document();
@@ -171,11 +170,11 @@ namespace compute.geometry
             GrasshopperDefinition rc = new GrasshopperDefinition(definition, null);
             rc.sourceComponentId = componentId;
             rc.singularComponent = component;
-            foreach (var input in component.Params.Input)
+            foreach(var input in component.Params.Input)
             {
                 rc.input[input.NickName] = new InputGroup(input);
             }
-            foreach (var output in component.Params.Output)
+            foreach(var output in component.Params.Output)
             {
                 rc.output[output.NickName] = output;
                 rc.outputTypeNames[output.NickName] = output.TypeName;
@@ -190,7 +189,7 @@ namespace compute.geometry
                 rc.HasErrors = true;
                 rc.ErrorMessages.Add(msg);
                 LogError(msg);
-            }
+            }   
             else
                 rc.input[name] = new InputGroup(param);
         }
@@ -202,7 +201,7 @@ namespace compute.geometry
                 rc.HasErrors = true;
                 rc.ErrorMessages.Add(msg);
                 LogError(msg);
-            }
+            }  
             else
             {
                 rc.output[name] = param;
@@ -214,7 +213,7 @@ namespace compute.geometry
         {
             string icon = null;
             var chunk = archive.GetRootNode.FindChunk("Definition");
-            if (chunk != null)
+            if (chunk!=null)
             {
                 chunk = chunk.FindChunk("DefinitionProperties");
                 if (chunk != null)
@@ -243,7 +242,7 @@ namespace compute.geometry
             }
 
             GrasshopperDefinition rc = new GrasshopperDefinition(definition, icon);
-            foreach (var obj in definition.Objects)
+            foreach( var obj in definition.Objects)
             {
                 IGH_ContextualParameter contextualParam = obj as IGH_ContextualParameter;
                 if (contextualParam != null)
@@ -265,7 +264,7 @@ namespace compute.geometry
                     {
                         IGH_Param param = contextBaker.Params.Input[0];
                         AddOutput(param, param.NickName, ref rc);
-                    }
+                    }     
                 }
 
                 if (className == "ContextPrintComponent")
@@ -284,7 +283,7 @@ namespace compute.geometry
 
                 string nickname = group.NickName;
                 var groupObjects = group.Objects();
-                if (nickname.Contains("RH_IN") && groupObjects.Count > 0)
+                if ( nickname.Contains("RH_IN") && groupObjects.Count>0)
                 {
                     var param = groupObjects[0] as IGH_Param;
                     if (param != null && !param.Locked)
@@ -299,12 +298,12 @@ namespace compute.geometry
                     {
                         AddOutput(param, nickname, ref rc);
                     }
-                    else if (groupObjects[0] is GH_Component component)
+                    else if(groupObjects[0] is GH_Component component)
                     {
                         int outputCount = component.Params.Output.Count;
-                        for (int i = 0; i < outputCount; i++)
+                        for(int i=0; i<outputCount; i++)
                         {
-                            if (1 == outputCount)
+                            if(1==outputCount)
                             {
                                 AddOutput(component.Params.Output[i], nickname, ref rc);
                             }
@@ -419,7 +418,7 @@ namespace compute.geometry
             var updatedInputs = new List<string>();
             var skippedInputs = new List<string>();
 
-            if (inputSchema.DataFormat == SchemaDataFormat.Grasshopper)
+            if(inputSchema.DataFormat == SchemaDataFormat.Grasshopper)
             {
                 foreach (var entry in inputSchema.GrasshopperValues.Values)
                 {
@@ -800,7 +799,7 @@ namespace compute.geometry
                 cancel.ThrowIfCancellationRequested();
             }
 
-            foreach (string msg in ErrorMessages)
+            foreach(string msg in ErrorMessages)
             {
                 outputSchema.Errors.Add(msg);
             }
@@ -834,10 +833,13 @@ namespace compute.geometry
 
                 if (format == SchemaDataFormat.Grasshopper)
                 {
+                    // Branch by branch, so the answer keeps the output's tree, empty branches and null items included.
                     var data = new GH_Structure<IGH_Goo>();
-                    foreach (var item in param.VolatileData.AllData(false))
+                    foreach (var path in param.VolatileData.Paths)
                     {
-                        data.Append(item);
+                        var branch = data.EnsurePath(path);
+                        foreach (var item in param.VolatileData.get_Branch(path))
+                            branch.Add(item as IGH_Goo);
                     }
 
                     outputSchema.GrasshopperValues.Values.Add(kvp.Key, data);
@@ -845,9 +847,7 @@ namespace compute.geometry
                 else if (format == SchemaDataFormat.Resthopper)
                 {
                     // Get data
-                    // VEKTORNODE: PARAM-ID — a standalone output parameter (an RH_OUT group's) has no parent.
-                    Guid paramId = param.Attributes?.Parent?.InstanceGuid ?? param.InstanceGuid;
-                    Resthopper.IO.DataTree<ResthopperObject> outputTree = SerializeDataTree(param.VolatileData, paramId, kvp.Key, rhinoVersion) as Resthopper.IO.DataTree<ResthopperObject>;
+                    Resthopper.IO.DataTree<ResthopperObject> outputTree = SerializeDataTree(param.VolatileData, OutputId(param), kvp.Key, rhinoVersion) as Resthopper.IO.DataTree<ResthopperObject>; // VEKTORNODE: PARAM-ID
                     outputSchema.Values.Add(outputTree);
                 }
             }
@@ -884,7 +884,11 @@ namespace compute.geometry
             }
         }
 
-        private static object SerializeDataTree(IGH_Structure data, Guid paramId, string name, int rhinoVersion = 7)
+        // VEKTORNODE: PARAM-ID — an output's Id is its top-level object (the Context Bake component,
+        // which clients key outputs by); a floating RH_OUT param has no parent and is its own.
+        static Guid OutputId(IGH_Param p) => p.Attributes?.GetTopLevel?.DocObject?.InstanceGuid ?? p.InstanceGuid;
+
+        private static object SerializeDataTree(IGH_Structure data, Guid paramId, string name, int rhinoVersion = 7) // VEKTORNODE: PARAM-ID — paramId
         {
             // Get data
             var outputTree = new Resthopper.IO.DataTree<ResthopperObject>();
@@ -933,7 +937,7 @@ namespace compute.geometry
                         GH_TextDot g           => GetResthopperObject<TextDot>(g.Value, rhinoVersion),
                         GH_Centermark g        => GetResthopperObject<Centermark>(g.Value, rhinoVersion),
                         // ── BEGIN VEKTORNODE: IO-HANDLERS — Selva output types ──
-                        GH_Colour g            => GetResthopperObject<Color>(g.Value, rhinoVersion),
+                        GH_Colour g            => GetResthopperObject<System.Drawing.Color>(g.Value, rhinoVersion),
 
                         // Selva SDK seam: any Goo implementing ISelvaSerializableGoo (matched by
                         // interface name, not assembly reference) owns its compute JSON. New Selva
@@ -956,7 +960,9 @@ namespace compute.geometry
                                              gooObj.GetType().FullName.IndexOf("FileDataGoo", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                              gooObj.GetType().FullName.IndexOf("UISchemaGoo", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                              gooObj.GetType().FullName.IndexOf("PlotlyFigure", StringComparison.OrdinalIgnoreCase) >= 0)
-                            => GetResthopperObject<object>(gooObj.GetType().GetProperty("Value")?.GetValue(gooObj), rhinoVersion),
+                            => gooObj.GetType().GetProperty("Value")?.GetValue(gooObj) is object legacyValue
+                                ? GetResthopperObject<object>(legacyValue, rhinoVersion)
+                                : null,
                         // ── END   VEKTORNODE: IO-HANDLERS — Selva output types ──
                         _                      => null
                     };
@@ -974,11 +980,7 @@ namespace compute.geometry
             return outputTree;
         }
 
-        // ============================================================================
-        // Selva SDK seam (reflection-based, no plugin assembly reference)
-        // ============================================================================
-
-
+        // ── BEGIN VEKTORNODE: IO-HANDLERS — Selva SDK seam (reflection, no plugin assembly reference) ──
         // True when the type (or any implemented interface) is named exactly `interfaceName`. Matched
         // by simple name so every Selva-family plugin can declare its own copy of the contract interface
         // without a shared assembly. See Selva.GH ISelvaOutput / ISelvaSerializableGoo.
@@ -1023,7 +1025,7 @@ namespace compute.geometry
                 Data = selvaJson
             };
         }
-
+        // ── END   VEKTORNODE: IO-HANDLERS — Selva SDK seam ──
 
         private void LogRuntimeMessages(IEnumerable<IGH_ActiveObject> objects, Schema schema)
         {
@@ -1080,12 +1082,12 @@ namespace compute.geometry
                 return iconString;
 
             System.Drawing.Bitmap bmp = null;
-            if (singularComponent != null)
+            if (singularComponent!=null)
             {
                 bmp = singularComponent.Icon_24x24;
             }
 
-            if (bmp != null)
+            if (bmp!=null)
             {
                 using (var ms = new MemoryStream())
                 {
@@ -1148,9 +1150,8 @@ namespace compute.geometry
                 {
                     Name = o.Key,
                     ParamType = outputTypeNames[o.Key],
-                    // VEKTORNODE: PARAM-ID — output objects are looked up by Id client-side, so the
-                    // schema must carry the same Instance Guid that ResthopperObject.Id is tagged with.
-                    Id = o.Value.InstanceGuid.ToString()
+                    // VEKTORNODE: PARAM-ID — the same Id the solve tags this output's objects with.
+                    Id = OutputId(o.Value).ToString()
                 });
             }
 
@@ -1236,7 +1237,7 @@ namespace compute.geometry
             return ArchiveFromBytes(contents);
         }
 
-        static GH_Archive ArchiveFromBytes(byte[] byteArray)
+        internal static GH_Archive ArchiveFromBytes(byte[] byteArray) // VEKTORNODE: SELVA — internal for grasshopper/schema
         {
             try
             {
@@ -1297,7 +1298,7 @@ namespace compute.geometry
 
                 param.ClearData();
                 param.CollectData();
-                defaultValue = SerializeDataTree(param.VolatileData, Param.InstanceGuid, param.Name);
+                defaultValue = SerializeDataTree(param.VolatileData, Param.InstanceGuid, param.Name); // VEKTORNODE: PARAM-ID
                 TypeName = ParamTypeName(param);
             }
 
@@ -1317,7 +1318,7 @@ namespace compute.geometry
             public int GetAtLeast()
             {
                 IGH_ContextualParameter contextualParameter = Param as IGH_ContextualParameter;
-                if (contextualParameter != null)
+                if(contextualParameter!=null)
                 {
                     return contextualParameter.AtLeast;
                 }
@@ -1342,7 +1343,7 @@ namespace compute.geometry
                 if (contextualParameter != null)
                 {
                     var result = contextualParameter.GetType().GetProperty("TreeAccess")?.GetValue(contextualParameter, null);
-                    if (result != null)
+                    if(result != null)
                         return (bool)result;
                 }
                 return false;
@@ -1379,7 +1380,7 @@ namespace compute.geometry
                     var pType = par.GetType();
                     var props = pType.GetProperties(BindingFlags.NonPublic | BindingFlags.Instance);
                     var info = props.FirstOrDefault(x => x.Name == "Minimum");
-                    if (info != null)
+                    if(info != null)
                     {
                         var val = info.GetValue(par, null);
                         if (val != null)
@@ -1401,7 +1402,7 @@ namespace compute.geometry
                     if (p.Sources.Count == 1)
                         p = p.Sources[0];
                 }
-
+                
                 if (p is GH_NumberSlider paramSlider)
                     return (double)paramSlider.Slider.Minimum;
                 return null;
@@ -1417,7 +1418,7 @@ namespace compute.geometry
                     var pTypeName = TypeName;
                     var props = pType.GetProperties(BindingFlags.NonPublic | BindingFlags.Instance);
                     var info = props.FirstOrDefault(x => x.Name == "Maximum");
-                    if (info != null)
+                    if(info != null)
                     {
                         var val = info.GetValue(par, null);
                         if (val != null)
@@ -1446,6 +1447,7 @@ namespace compute.geometry
                 return null;
             }
 
+            // ── BEGIN VEKTORNODE: IO-HANDLERS — group name + enumerated values for /io ──
             /// <summary>
             /// Gets the full hierarchical group name for the parameter (e.g., "Layer_1::Layer_2::Layer_3")
             /// </summary>
@@ -1469,13 +1471,10 @@ namespace compute.geometry
                 if (!allGroupsContainingParam.Any())
                     return null;
 
-                if (allGroupsContainingParam.Count == 1)
-                    return allGroupsContainingParam.First().NickName;
-
-                // Build hierarchy by finding parent-child relationships
+                // Build hierarchy by finding parent-child relationships; drops RH_IN groups.
                 var hierarchy = BuildGroupHierarchy(allGroupsContainingParam);
 
-                return string.Join("::", hierarchy.Select(g => g.NickName));
+                return hierarchy.Count > 0 ? string.Join("::", hierarchy.Select(g => g.NickName)) : null;
             }
 
             public Dictionary<string, string> GetValues()
@@ -1568,6 +1567,7 @@ namespace compute.geometry
                 // Check if parentGroup contains childGroup as one of its objects
                 return parentGroup.Objects().Any(obj => obj.InstanceGuid == childGroup.InstanceGuid);
             }
+            // ── END   VEKTORNODE: IO-HANDLERS — group name + enumerated values for /io ──
 
             public bool AlreadySet(Resthopper.IO.DataTree<ResthopperObject> tree)
             {

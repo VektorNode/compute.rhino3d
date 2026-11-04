@@ -225,8 +225,8 @@ them again; the machine itself is billed by its host whether busy or not.
 
 Every request a child answers resets that clock: `/healthcheck`, `/version` and
 `/plugins/...` as well as solves. A monitor that probes one of them keeps Rhino
-billing around the clock. Probe `/activechildren?initialize=false` instead, which
-the parent answers without waking a child.
+billing around the clock. Probe `/activechildren` instead: the parent answers it
+without waking or spawning a child.
 
 ## Checking Status
 

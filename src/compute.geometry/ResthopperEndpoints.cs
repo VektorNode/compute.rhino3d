@@ -102,45 +102,6 @@ namespace compute.geometry
             }
         }
 
-        // VEKTORNODE: CACHE-ERRORED-SOLVES — detect whether a cached solve-result JSON came from an errored
-        // solve, so a cache hit can mirror the live path's 500 status. Parses only the
-        // top-level "errors" array via a streaming reader — avoids deserializing the
-        // (potentially multi-MB) geometry payload. Any parse trouble → treat as no
-        // errors (caller falls back to 200), never throws.
-        static bool CachedResultHasErrors(string cachedJson)
-        {
-            if (string.IsNullOrEmpty(cachedJson))
-                return false;
-            try
-            {
-                using (var reader = new JsonTextReader(new System.IO.StringReader(cachedJson)))
-                {
-                    while (reader.Read())
-                    {
-                        // Depth 1: a property of the root object, not a nested "errors".
-                        if (reader.TokenType == JsonToken.PropertyName && reader.Depth == 1
-                            && string.Equals((string)reader.Value, "errors", StringComparison.OrdinalIgnoreCase))
-                        {
-                            // Move to the value; a non-empty array means the solve errored.
-                            if (!reader.Read() || reader.TokenType != JsonToken.StartArray)
-                                return false;
-                            while (reader.Read())
-                            {
-                                if (reader.TokenType == JsonToken.EndArray)
-                                    return false; // empty array → no errors
-                                return true; // first element seen → has errors
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Serilog.Log.Debug(ex, "CachedResultHasErrors: failed to inspect cached JSON; assuming no errors");
-            }
-            return false;
-        }
-
         // ── BEGIN VEKTORNODE: SELVA — live events ──
         /// <summary>
         ///     The callback target the document may use, or an empty target when the request
@@ -271,7 +232,7 @@ namespace compute.geometry
                     ctx.Response.Headers.Append("X-Compute-Profile", definition.ProfileJson(Config.ProfileTop));
                 if (definition.HasErrors)
                     ctx.Response.StatusCode = 500; // internal server error
-                if (!definition.HasErrors || input.CacheErroredSolves) // VEKTORNODE: CACHE-ERRORED-SOLVES — opt-in, see FORK_CHANGES §5
+                else
                 {
                     if (input.CacheSolve)
                     {
@@ -315,14 +276,6 @@ namespace compute.geometry
                 if (!string.IsNullOrWhiteSpace(cachedReturnJson))
                 {
                     ctx.Response.ContentType = "application/json";
-                    // VEKTORNODE: CACHE-ERRORED-SOLVES — a cached result may be from an errored-but-completed
-                    // solve (CacheErroredSolves). The live solve path returns 500 for an
-                    // errored solve, so a cache HIT must return the SAME status — otherwise
-                    // the same request yields 200 on a hit and 500 on a miss, and clients
-                    // that branch on status see inconsistent behavior. The cached body
-                    // carries a non-empty "errors" array exactly when the solve errored.
-                    if (CachedResultHasErrors(cachedReturnJson))
-                        ctx.Response.StatusCode = 500;
                     // VEKTORNODE: SELVA — solve timing: a hit runs nothing, and says so.
                     ctx.Response.Headers.Append("Server-Timing", "cache;desc=\"hit\"");
                     await ctx.Response.WriteAsync(cachedReturnJson);

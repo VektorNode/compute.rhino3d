@@ -26,7 +26,6 @@ Tags used:
 - **SELVA FIX** — a bug fix relative to upstream (wrapped in BEGIN/END banners).
 - **PARAM-ID** — threads the source Grasshopper parameter's Instance Guid through the IO model.
 - **IO-HANDLERS** — extra input/output type handlers + schema metadata not in upstream.
-- **CACHE-ERRORED-SOLVES** — opt-in caching of errored-but-completed solves.
 
 > **Auditing the delta against upstream:** use
 > `git diff --ignore-all-space upstream/9.x 9.x.selva`. A plain `git diff` also reports files
@@ -140,13 +139,6 @@ and per-parameter declared defaults on the schema.
   the same Id.
 - **`/io` wire names.** Upstream's PascalCase is kept; only the fields we add are camelCase
   (`id`, `groupName`, `values`), as on `8.x.selva`.
-
-### 5. Errored-solve caching, opt-in (CACHE-ERRORED-SOLVES)
-
-**Files:** `src/compute.geometry/IO/Schema.cs`, `src/compute.geometry/ResthopperEndpoints.cs`
-
-By default an errored solve is not served from cache. Adds the opt-in flag and the detection of
-whether a cached solve-result JSON came from an errored-but-completed solve.
 
 ### 6. Undo recording forced off server-side (SELVA FIX)
 

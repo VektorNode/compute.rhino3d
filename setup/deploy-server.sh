@@ -73,6 +73,16 @@ BRANCH="${BRANCH:-$(sed -n 's/^ARG BRANCH=//p' "$SCRIPT_DIR/Dockerfile")}"
 
 ssh_() { ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "$DEPLOY_HOST" "$@"; }
 
+# sync_dir SRC/ REMOTE_DIR [EXCLUDE] → REMOTE_DIR mirrors SRC (symlinks followed). Git Bash on
+# Windows has no rsync, so tar over ssh stands in there.
+sync_dir() {
+    if command -v rsync >/dev/null; then
+        rsync -aL --delete ${3:+--exclude "$3"} "$1" "$DEPLOY_HOST:$2/"
+    else
+        tar -C "$1" -chf - ${3:+--exclude "$3"} . | ssh_ "rm -rf '$2' && mkdir -p '$2' && tar -C '$2' -xf -"
+    fi
+}
+
 case "${1:-deploy}" in
     status) ssh_ "cd $DEPLOY_DIR/setup && ./docker-status.sh"; exit ;;
     logs)   ssh -t "$DEPLOY_HOST" "docker logs -f --tail 100 $CONTAINER_NAME"; exit ;;
@@ -119,7 +129,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 plugin_names=()
 suspect=0
-manifest="deployed $(date -u +%Y-%m-%dT%H:%MZ) from $(hostname -s), compute $BRANCH ${remote_head:0:7}"$'\n'
+manifest="deployed $(date -u +%Y-%m-%dT%H:%MZ) from $(hostname | cut -d. -f1), compute $BRANCH ${remote_head:0:7}"$'\n'
 IFS=',' read -ra _plugin_dirs <<< "$DEPLOY_PLUGINS"
 for p in "${_plugin_dirs[@]}"; do
     p="$(echo "$p" | xargs)"
@@ -185,11 +195,11 @@ ssh_ "set -e
 ok "checkout at ${remote_head:0:7}"
 
 # -L ships each staged symlink's target; --delete drops plugins no longer deployed.
-rsync -aL --delete "$STAGE/" "$DEPLOY_HOST:plugins/"
-[ -f "$SCRIPT_DIR/packages.json" ] && rsync -a "$SCRIPT_DIR/packages.json" "$DEPLOY_HOST:$DEPLOY_DIR/setup/"
-rsync -a --delete --exclude README.md "$SCRIPT_DIR/plugins/" "$DEPLOY_HOST:$DEPLOY_DIR/setup/plugins/"
+sync_dir "$STAGE/" plugins
+[ -f "$SCRIPT_DIR/packages.json" ] && ssh_ "cat > $DEPLOY_DIR/setup/packages.json" < "$SCRIPT_DIR/packages.json"
+sync_dir "$SCRIPT_DIR/plugins/" "$DEPLOY_DIR/setup/plugins" README.md
 mkdir -p "$SCRIPT_DIR/fonts"
-rsync -a --delete "$SCRIPT_DIR/fonts/" "$DEPLOY_HOST:$DEPLOY_DIR/setup/fonts/"
+sync_dir "$SCRIPT_DIR/fonts/" "$DEPLOY_DIR/setup/fonts"
 ok "plugins, packages.json and fonts synced"
 
 server_home="$(ssh_ 'echo $HOME')"

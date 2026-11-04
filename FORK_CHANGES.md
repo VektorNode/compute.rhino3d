@@ -23,7 +23,6 @@ Tags used:
 - **SELVA FIX** — a bug fix relative to upstream (wrapped in BEGIN/END banners).
 - **PARAM-ID** — threads the source Grasshopper parameter's Instance Guid through the IO model.
 - **IO-HANDLERS** — extra input/output type handlers + schema metadata not in upstream.
-- **CACHE-ERRORED-SOLVES** — opt-in caching of errored-but-completed solves.
 
 > **Auditing the delta against upstream:** compare with
 > `git diff --ignore-all-space upstream/8.x 8.x.selva`. A plain `git diff` also
@@ -115,14 +114,6 @@ diagnosable from the parent log rather than only forwarded to the caller.
 `resultsCache.Trim(100)` is best-effort and may leave entries behind, so `POST /cache/purge` did
 not reliably empty the cache. Every key is now removed explicitly. Payloads are not disposed: a
 concurrent solve may still hold a shallow duplicate of cached geometry.
-
-### 10. Errored-solve caching, opt-in (CACHE-ERRORED-SOLVES)
-**Files:** `src/compute.geometry/IO/Schema.cs`, `src/compute.geometry/ResthopperEndpoints.cs`
-
-Upstream never caches an errored solve. Many definitions raise Grasshopper errors by design while
-still producing correct geometry, so `cacheerroredsolves: true` (with `cachesolve`) caches them
-too. The status stays 500, and a cache hit returns 500 as well when the cached body's top-level
-`errors` array is non-empty (`CachedResultHasErrors`), so a hit and a miss answer alike.
 
 ### 11. Stable error code on 500s (SELVA)
 **Files:** `src/compute.geometry/Startup.cs`, `src/compute.geometry/ResthopperEndpoints.cs` (`DefinitionNotCachedException`)

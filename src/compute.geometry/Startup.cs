@@ -53,7 +53,7 @@ namespace compute.geometry
                     Log.Warning("Bad request {Method} {Path}: {Message}", ctx.Request.Method, ctx.Request.Path, badRequest.Message);
                     ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
                     ctx.Response.ContentType = "application/json";
-                    await ctx.Response.WriteAsync(JsonConvert.SerializeObject(new { error = "Bad Request", message = badRequest.Message }));
+                    await ctx.Response.WriteAsync(JsonConvert.SerializeObject(new { error = "Bad Request", message = badRequest.Message, code = "bad_request" })); // VEKTORNODE: SELVA — stable code, see FORK_CHANGES §7
                     return;
                 }
 
@@ -149,7 +149,7 @@ namespace compute.geometry
 
             if (Config.Debug || Config.LogLevel <= LogEventLevel.Debug)
                 Rhino.RhinoApp.SendWriteToConsole = true;
-
+            
             Environment.SetEnvironmentVariable("RHINO_TOKEN", null, EnvironmentVariableTarget.Process);
             Rhino.Runtime.HostUtils.OnExceptionReport += (source, ex) =>
             {
@@ -218,74 +218,12 @@ namespace compute.geometry
                 Log.Information("(3/4) Loading grasshopper");
 
 #if LINUX
-                // VEKTORNODE: SELVA FIX — log each step. A missed load means definitions
-                // solve with core components only and no plugin (or RH_OUT-in-plugin-group)
-                // outputs, surfacing later as an opaque "no outputs" solve failure.
-                Rhino.Runtime.HostUtils.SendDebugToCommandLine = Config.Debug;
                 var ghpath = RhinoInside.Resolver.RhinoSystemDirectory + "/Plug-ins/Grasshopper/GrasshopperPlugin.rhp";
-                Log.Information("Grasshopper plugin path: {Path} (exists: {Exists})", ghpath, System.IO.File.Exists(ghpath));
                 var pluginresult = Rhino.PlugIns.PlugIn.LoadPlugIn(ghpath, out Guid ghid);
-                Log.Information("Grasshopper LoadPlugIn returned {Result} (id {Id})", pluginresult, ghid);
-                var rawPluginObject = Rhino.RhinoApp.GetPlugInObject(ghid);
-                var pluginObject = rawPluginObject as Grasshopper.Plugin.GH_RhinoScriptInterface;
-                if (pluginObject != null)
-                {
+                var pluginObject = Rhino.RhinoApp.GetPlugInObject(ghid) as Grasshopper.Plugin.GH_RhinoScriptInterface;
+                if(pluginObject != null)
                     pluginObject.RunHeadless();
-
-                    // VEKTORNODE: SELVA FIX — GH loads external libraries exactly once, inside the
-                    // Instances.ComponentServer getter (guarded by a null check). Any
-                    // exception in that load is swallowed into a MessageBox that never
-                    // shows headless — which is how plugin loading fails silently here.
-                    // Rhino 9 WIP bug: PlugIn.GetMultiTargetPath → HostUtils.GetRuntimeSpecificFolder
-                    // throws on Linux (the OS suffix is null there, and string.IndexOf(null) throws)
-                    // for any plugin laid out with TFM subfolders (MyPlugin/net7.0/MyPlugin.gha).
-                    // GH_ComponentServer.ExternalFiles has no per-file try/catch, so a single such
-                    // file aborts the whole scan and NO plugins load. Quarantine offenders with a
-                    // .no9 marker (GH skips marked files) and warn loudly.
-                    try
-                    {
-                        var getMultiTargetPath = typeof(Rhino.PlugIns.PlugIn).GetMethod("GetMultiTargetPath",
-                            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
-                        foreach (var folderInfo in Grasshopper.Folders.AssemblyFolders)
-                        {
-                            if (!System.IO.Directory.Exists(folderInfo.Folder))
-                                continue;
-                            foreach (var gha in System.IO.Directory.GetFiles(folderInfo.Folder, "*.gha", folderInfo.SearchOption))
-                            {
-                                try { getMultiTargetPath?.Invoke(null, new object[] { gha }); }
-                                catch
-                                {
-                                    Log.Warning("Quarantining {Gha}: multi-target (netX.0 subfolder) plugin layouts crash Rhino's Linux runtime-folder resolution — flatten the folder so the .gha has no netX.0 parent", gha);
-                                    try { System.IO.File.Create(System.IO.Path.ChangeExtension(gha, ".no9")).Dispose(); }
-                                    catch (Exception mex) { Log.Warning("Could not write quarantine marker for {Gha}: {Message}", gha, mex.Message); }
-                                }
-                            }
-                        }
-
-                        Log.Information("Loading Grasshopper external libraries (GHA plugins)...");
-                        // Touching the getter triggers GH's own guarded, once-only
-                        // LoadExternalFiles. Do NOT call LoadExternalFiles() again here —
-                        // that loads every assembly twice and floods the component server
-                        // with object-ID conflicts ("N objects could not be loaded").
-                        var componentServer = Grasshopper.Instances.ComponentServer;
-                        foreach (var lex in componentServer.LoadingExceptions)
-                            Log.Warning("Grasshopper library load error: {Name}: {Message}", lex.Name, lex.Message);
-                        foreach (var lib in componentServer.Libraries)
-                        {
-                            if (!lib.IsCoreLibrary)
-                                Log.Information("Loaded Grasshopper plugin: {Name} {Version}", lib.Name, lib.Version);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Error(ex, "Failed to load Grasshopper external libraries — GH plugins may be unavailable");
-                    }
-                }
-                else
-                {
-                    Log.Error("Grasshopper plugin object unavailable (GetPlugInObject returned {Type}); RunHeadless skipped — GH plugins will NOT load",
-                        rawPluginObject?.GetType().FullName ?? "null");
-                }
+                LinuxGhPlugins.Load(); // VEKTORNODE: SELVA FIX — see LinuxGhPlugins, FORK_CHANGES §10
 #else
                 var pluginObject = Rhino.RhinoApp.GetPlugInObject("Grasshopper");
                 var runheadless = pluginObject?.GetType().GetMethod("RunHeadless");

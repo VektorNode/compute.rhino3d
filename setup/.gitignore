@@ -7,5 +7,3 @@ plugins/*
 # custom fonts (often licensed — mounted into the container by docker-launch.sh)
 fonts/*
 
-# deploy-server.sh config (secrets)
-.env.server

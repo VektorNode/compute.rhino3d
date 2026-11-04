@@ -322,19 +322,11 @@ namespace compute.geometry
         /// definition cache, since active clients may hold Pointer references to entries
         /// there. Returns the number of items removed. Exposed via the POST /cache/purge
         /// endpoint for operator-driven cleanup when host memory pressure is observed.
-        ///
-        /// Enumerates and Remove()s every key explicitly rather than calling Trim(100):
-        /// MemoryCache.Trim is best-effort (it evicts by an internal heuristic and may leave
-        /// items behind), so it cannot honor the "purges every entry" contract. Explicit
-        /// removal also lets us dispose the native Rhino geometry held by URL-data entries —
-        /// a Tuple&lt;JToken, object&gt; whose Item2 may be a GeometryBase (see GetCachedItem).
-        /// GeometryBase wraps unmanaged C++ memory; dropping the managed reference alone leaks
-        /// it until finalization, which defeats the memory-relief purpose of this endpoint.
         /// </summary>
         public static long PurgeSolveResults()
         {
-            // VEKTORNODE: SELVA FIX — purge every entry and free its native geometry.
-            // Snapshot keys first: removing during the cache's own enumeration is unsafe.
+            // VEKTORNODE: SELVA FIX — Trim(100) is best-effort and can leave entries behind, so remove
+            // every key. Payloads are not disposed: a concurrent solve may still use the geometry.
             var keys = new List<string>();
             foreach (var kvp in resultsCache)
                 keys.Add(kvp.Key);
@@ -342,18 +334,8 @@ namespace compute.geometry
             long removed = 0;
             foreach (var key in keys)
             {
-                var entry = resultsCache.Remove(key);
-                if (entry == null)
-                    continue; // already evicted by LRU/another purge between snapshot and removal
-                removed++;
-
-                // URL-data entries hold a (JToken, object) tuple whose object may be native
-                // Rhino geometry; dispose it so the purge actually frees the unmanaged memory.
-                if (entry is Tuple<JToken, object> tuple && tuple.Item2 is IDisposable disposable)
-                {
-                    try { disposable.Dispose(); }
-                    catch (Exception ex) { Log.Warning(ex, "Exception disposing cached geometry for key {Key}", key); }
-                }
+                if (resultsCache.Remove(key) != null)
+                    removed++;
             }
             return removed;
         }

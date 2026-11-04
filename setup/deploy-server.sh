@@ -3,7 +3,7 @@
 # deploy-server.sh  (macOS / Linux)
 # Deploys Rhino.Compute to a Linux server over SSH. The server runs the image
 # built from the pushed branch, your local packages.json, fonts and plugin
-# builds, with its own settings from setup/.env.server.
+# builds, with the SERVER_-prefixed settings from setup/.env.
 #
 # Usage:
 #   ./deploy-server.sh            # sync, rebuild, recreate the container, verify
@@ -15,18 +15,21 @@
 # sudo (x86-64 for current Rhino builds). The first deploy runs server-init.sh
 # there to install Docker.
 #
-# setup/.env.server (gitignored; template .env.server.example):
+# setup/.env (gitignored; template .env.example), or the file named by ENV_FILE=/path/.env,
+# also holds the local settings:
 #   DEPLOY_HOST    - ssh destination, e.g. deploy@203.0.113.10
 #   DEPLOY_DIR     - checkout on the server, relative to its home (default: compute.rhino3d)
 #   DEPLOY_PLUGINS - comma-separated local plugin build folders to ship
-#                    (default: LOCAL_PLUGINS from setup/.env)
+#                    (default: LOCAL_PLUGINS)
 #   DEPLOY_TLS_DOMAIN - serve https://<this name> through Caddy with a Let's Encrypt
 #                    certificate. The name must resolve to the server and ports 80
 #                    and 443 must be open to the internet. Compute then listens on
 #                    localhost only. Unset removes the proxy.
 #   DEPLOY_ALLOW_IPS - with DEPLOY_TLS_DOMAIN: comma-separated addresses or CIDR
 #                    ranges allowed through the proxy; everyone else gets 403.
-#   Every other line becomes the server's setup/.env (RHINO_TOKEN, IDLE_SPAN, ...).
+#   SERVER_<NAME>  - the server's value for NAME (SERVER_MEMORY, SERVER_RHINO_COMPUTE_KEY, ...);
+#                    otherwise the plain NAME applies. Only COMPUTE_ENV_VARS
+#                    (env-lib.sh) reach the server's setup/.env.
 #
 # YES=1 skips the question asked when a plugin comes from a dirty tree or a
 # branch other than its repo's default.
@@ -36,36 +39,49 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-SERVER_ENV="$SCRIPT_DIR/.env.server"
+ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/env-lib.sh"
 
 log()  { echo ""; echo "==> $1"; }
 ok()   { echo "    ✓  $1"; }
 die()  { echo ""; echo "ERROR: $1" >&2; exit 1; }
 
-[ -f "$SERVER_ENV" ] || die "setup/.env.server not found — cp .env.server.example .env.server and fill it in."
-
-env_value() { # env_value FILE NAME → last NAME= value, surrounding quotes stripped
-    [ -f "$1" ] || return 0
-    sed -n "s/^[[:space:]]*$2=//p" "$1" | tail -1 | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+server_value() { # server_value NAME → SERVER_NAME if set, else NAME
+    local v; v="$(env_value "$ENV_FILE" "SERVER_$1")"
+    [ -n "$v" ] || v="$(env_value "$ENV_FILE" "$1")"
+    printf '%s' "$v"
 }
 
-DEPLOY_HOST="$(env_value "$SERVER_ENV" DEPLOY_HOST)"
-DEPLOY_DIR="$(env_value "$SERVER_ENV" DEPLOY_DIR)"; DEPLOY_DIR="${DEPLOY_DIR:-compute.rhino3d}"
-DEPLOY_PLUGINS="$(env_value "$SERVER_ENV" DEPLOY_PLUGINS)"
-[ -n "$DEPLOY_PLUGINS" ] || DEPLOY_PLUGINS="$(env_value "$SCRIPT_DIR/.env" LOCAL_PLUGINS)"
-DEPLOY_TLS_DOMAIN="$(env_value "$SERVER_ENV" DEPLOY_TLS_DOMAIN)"
-DEPLOY_ALLOW_IPS="$(env_value "$SERVER_ENV" DEPLOY_ALLOW_IPS)"
-CONTAINER_NAME="$(env_value "$SERVER_ENV" CONTAINER_NAME)"; CONTAINER_NAME="${CONTAINER_NAME:-rhino-compute-x9}"
-PORT="$(env_value "$SERVER_ENV" PORT)"; PORT="${PORT:-6500}"
+[ -f "$ENV_FILE" ] || die "$ENV_FILE not found — cp setup/.env.example setup/.env and fill it in."
+
+DEPLOY_HOST="$(env_value "$ENV_FILE" DEPLOY_HOST)"
+DEPLOY_DIR="$(env_value "$ENV_FILE" DEPLOY_DIR)"; DEPLOY_DIR="${DEPLOY_DIR:-compute.rhino3d}"
+DEPLOY_PLUGINS="$(env_value "$ENV_FILE" DEPLOY_PLUGINS)"
+[ -n "$DEPLOY_PLUGINS" ] || DEPLOY_PLUGINS="$(env_value "$ENV_FILE" LOCAL_PLUGINS)"
+DEPLOY_TLS_DOMAIN="$(env_value "$ENV_FILE" DEPLOY_TLS_DOMAIN)"
+DEPLOY_ALLOW_IPS="$(env_value "$ENV_FILE" DEPLOY_ALLOW_IPS)"
+CONTAINER_NAME="$(server_value CONTAINER_NAME)"; CONTAINER_NAME="${CONTAINER_NAME:-rhino-compute-x9}"
+PORT="$(server_value PORT)"; PORT="${PORT:-6500}"
 TLS_CONTAINER=rhino-compute-tls
-REPO_URL="$(env_value "$SERVER_ENV" REPO_URL)"
+REPO_URL="$(server_value REPO_URL)"
 REPO_URL="${REPO_URL:-$(sed -n 's/^ARG REPO_URL=//p' "$SCRIPT_DIR/Dockerfile")}"
-BRANCH="$(env_value "$SERVER_ENV" BRANCH)"
+BRANCH="$(server_value BRANCH)"
 BRANCH="${BRANCH:-$(sed -n 's/^ARG BRANCH=//p' "$SCRIPT_DIR/Dockerfile")}"
 
-[ -n "$DEPLOY_HOST" ] || die "DEPLOY_HOST is not set in setup/.env.server."
+[ -n "$DEPLOY_HOST" ] || die "DEPLOY_HOST is not set in setup/.env."
 
 ssh_() { ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "$DEPLOY_HOST" "$@"; }
+
+# sync_dir SRC/ REMOTE_DIR [EXCLUDE] → REMOTE_DIR mirrors SRC (symlinks followed). Git Bash on
+# Windows has no rsync, so tar over ssh stands in there.
+sync_dir() {
+    if command -v rsync >/dev/null; then
+        rsync -aL --delete ${3:+--exclude "$3"} "$1" "$DEPLOY_HOST:$2/"
+    else
+        tar -C "$1" -chf - ${3:+--exclude "$3"} . | ssh_ "rm -rf '$2' && mkdir -p '$2' && tar -C '$2' -xf -"
+    fi
+}
 
 case "${1:-deploy}" in
     status) ssh_ "cd $DEPLOY_DIR/setup && ./docker-status.sh"; exit ;;
@@ -113,7 +129,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 plugin_names=()
 suspect=0
-manifest="deployed $(date -u +%Y-%m-%dT%H:%MZ) from $(hostname -s), compute $BRANCH ${remote_head:0:7}"$'\n'
+manifest="deployed $(date -u +%Y-%m-%dT%H:%MZ) from $(hostname | cut -d. -f1), compute $BRANCH ${remote_head:0:7}"$'\n'
 IFS=',' read -ra _plugin_dirs <<< "$DEPLOY_PLUGINS"
 for p in "${_plugin_dirs[@]}"; do
     p="$(echo "$p" | xargs)"
@@ -179,18 +195,22 @@ ssh_ "set -e
 ok "checkout at ${remote_head:0:7}"
 
 # -L ships each staged symlink's target; --delete drops plugins no longer deployed.
-rsync -aL --delete "$STAGE/" "$DEPLOY_HOST:plugins/"
-[ -f "$SCRIPT_DIR/packages.json" ] && rsync -a "$SCRIPT_DIR/packages.json" "$DEPLOY_HOST:$DEPLOY_DIR/setup/"
-rsync -a --delete --exclude README.md "$SCRIPT_DIR/plugins/" "$DEPLOY_HOST:$DEPLOY_DIR/setup/plugins/"
+sync_dir "$STAGE/" plugins
+[ -f "$SCRIPT_DIR/packages.json" ] && ssh_ "cat > $DEPLOY_DIR/setup/packages.json" < "$SCRIPT_DIR/packages.json"
+sync_dir "$SCRIPT_DIR/plugins/" "$DEPLOY_DIR/setup/plugins" README.md
 mkdir -p "$SCRIPT_DIR/fonts"
-rsync -a --delete "$SCRIPT_DIR/fonts/" "$DEPLOY_HOST:$DEPLOY_DIR/setup/fonts/"
+sync_dir "$SCRIPT_DIR/fonts/" "$DEPLOY_DIR/setup/fonts"
 ok "plugins, packages.json and fonts synced"
 
 server_home="$(ssh_ 'echo $HOME')"
 server_plugins=""
 for name in "${plugin_names[@]}"; do server_plugins+="$server_home/plugins/$name,"; done
 {
-    grep -vE '^[[:space:]]*(DEPLOY_[A-Z_]*|LOCAL_PLUGINS)=' "$SERVER_ENV" || true
+    for var in $COMPUTE_ENV_VARS; do
+        [ "$var" = LOCAL_PLUGINS ] && continue
+        val="$(server_value "$var")"
+        [ -z "$val" ] || printf '%s="%s"\n' "$var" "$val"
+    done
     echo "LOCAL_PLUGINS=${server_plugins%,}"
     # Behind the proxy, plain HTTP on PORT must not reach the internet.
     [ -n "$DEPLOY_TLS_DOMAIN" ] && echo "BIND=127.0.0.1"
@@ -247,7 +267,7 @@ EOF
         docker run -d --name $TLS_CONTAINER --restart unless-stopped --network host \
             -v rhino-compute-tls:/data -v \$HOME/caddy/Caddyfile:/etc/caddy/Caddyfile:ro \
             caddy:2 >/dev/null"
-    key="$(env_value "$SERVER_ENV" RHINO_COMPUTE_KEY)"
+    key="$(server_value RHINO_COMPUTE_KEY)"
     hdr=(); [ -n "$key" ] && hdr=(-H "RhinoComputeKey: $key")
     for i in $(seq 1 24); do
         code="$(curl -s -o /dev/null -w '%{http_code}' -m 10 "${hdr[@]}" "https://$DEPLOY_TLS_DOMAIN/healthcheck" || true)"

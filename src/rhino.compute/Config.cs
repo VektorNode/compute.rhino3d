@@ -121,6 +121,12 @@ namespace rhino.compute
         public static bool Compression { get; private set; }
 
         /// <summary>
+        /// RHINO_COMPUTE_ABORT_ON_HANGUP: a caller that hangs up closes its child's request too, so
+        /// the child stops the solve. Off by default; children inherit the variable.
+        /// </summary>
+        public static bool AbortOnHangUp { get; private set; }
+
+        /// <summary>
         /// RHINO_MCP_AUTOSTART_PORT: turns on the /mcp route. The value is the loopback port the
         /// dedicated MCP child's RhinoAI listener is asked to bind; the plug-in reads the same
         /// variable. Unset or 0: /mcp is off and no child starts an MCP listener.
@@ -186,6 +192,8 @@ namespace rhino.compute
             }
 
             Compression = GetEnvironmentVariable(RHINO_COMPUTE_COMPRESSION, true);
+            // VEKTORNODE: SELVA — abort on hang-up.
+            AbortOnHangUp = GetEnvironmentVariable(RHINO_COMPUTE_ABORT_ON_HANGUP, false);
 
             McpPort = GetEnvironmentVariable(RHINO_MCP_AUTOSTART_PORT, 0);
             if (McpPort < 0 || McpPort > 65535)
@@ -218,6 +226,8 @@ namespace rhino.compute
         const string RHINO_COMPUTE_CHILDCOUNT = "RHINO_COMPUTE_CHILDCOUNT";
         const string RHINO_COMPUTE_IDLESPAN = "RHINO_COMPUTE_IDLESPAN";
         const string RHINO_COMPUTE_COMPRESSION = "RHINO_COMPUTE_COMPRESSION";
+        const string RHINO_COMPUTE_ABORT_ON_HANGUP = "RHINO_COMPUTE_ABORT_ON_HANGUP";
+
         // Shared with the RhinoAI plug-in (MCPSpawnCommand.PortEnvVar): it is the variable the
         // plug-in reads to start its listener, so one setting opts the whole stack in.
         const string RHINO_MCP_AUTOSTART_PORT = "RHINO_MCP_AUTOSTART_PORT";

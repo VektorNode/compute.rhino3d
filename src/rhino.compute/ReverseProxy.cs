@@ -100,6 +100,14 @@ namespace rhino.compute
             // etc. Both routes share the same handler. The original slug stays for backward compat.
             app.MapGet("/activechildren", ActiveChildrenEndpoint);
             app.MapGet("/active-children", ActiveChildrenEndpoint);
+            // VEKTORNODE: SELVA — limits a client must stay within. Answered here, not by a child:
+            // this process's timeout and body cap are the ones a request meets first.
+            app.MapGet("/limits", async (HttpResponse res) => await res.WriteAsJsonAsync(new
+            {
+                timeoutSeconds = Config.ReverseProxyRequestTimeout,
+                maxRequestBytes = Config.MaxRequestSize,
+                signalsStaleDefinition = true,
+            }));
             app.MapGet("/launch", LaunchChildren);
             app.MapGet("/favicon.ico", async (context) => await context.Response.WriteAsync("Handled"));
 

@@ -369,6 +369,18 @@ paths go through the same step instead of `GH_Archive.ReadFromFile`, which parse
 A bitmap a component stores inside the definition still throws; no Selva component stores one.
 The Windows build is unchanged.
 
+### 21. Limits a client can read (SELVA)
+
+**Files:** `src/rhino.compute/ReverseProxy.cs` — `MapEndpoints`; `src/compute.geometry/FixedEndpoints.cs` — `GetLimits`
+
+Upstream gives a client no way to learn the server's timeout or body cap, so Selva carried its own
+copies of both, and an operator had to keep two sets of numbers in step. A copy set higher than the
+server's ended in a bare 413 or 502. `GET /limits` returns `timeoutSeconds` (`RHINO_COMPUTE_TIMEOUT`
+or `--timeout`), `maxRequestBytes` (`RHINO_COMPUTE_MAX_REQUEST_SIZE` or `--max-request-size`) and
+`signalsStaleDefinition` (a stale definition pointer answers `definition_not_cached`, see
+§7). `rhino.compute` answers it itself, because its own timeout and body cap are what
+a request meets first; a child reached directly answers with its own config.
+
 ---
 
 ## Non-source divergence

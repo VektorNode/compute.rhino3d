@@ -43,3 +43,4 @@ RhinoCompute.cs
 /setup/infrastructure
 **/.idea
 src/compute.sln.DotSettings.user
+setup/packages.json

@@ -188,7 +188,7 @@ by the `DEPLOY_*` and `SERVER_*` lines in `setup/.env` (template [.env.example](
    there: Docker with log rotation, git, rsync, curl and jq, automatic security updates,
    and key-only SSH. It also works as a cloud's first-boot script.
 4. Syncs the plugin builds (`LOCAL_PLUGINS` unless `DEPLOY_PLUGINS`
-   is set), `packages.json`, `setup/plugins/` and `setup/fonts/`, and writes the
+   is set), `packages.json` (`DEPLOY_PACKAGES` names another), `setup/plugins/` and `setup/fonts/`, and writes the
    server's `setup/.env`: each variable in `COMPUTE_ENV_VARS` ([env-lib.sh](env-lib.sh)),
    taking `SERVER_<NAME>` over `<NAME>` when both are set.
 5. Runs `docker-launch.sh` on the server, waits for `/healthcheck`, and prints

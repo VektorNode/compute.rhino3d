@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/env-lib.sh"
-load_env "$SCRIPT_DIR/.env"
+load_env "${ENV_FILE:-$SCRIPT_DIR/.env}"
 
 CONTAINER_NAME="${CONTAINER_NAME:-rhino-compute-x9}"
 PORT="${PORT:-6500}"

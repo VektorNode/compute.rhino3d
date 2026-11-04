@@ -49,6 +49,9 @@ Desktop translates them; the container side stays POSIX either way.
 
 Values already set in your shell environment take priority over `.env`.
 
+`ENV_FILE=/path/to/.env ./deploy-server.sh` (also `docker-launch.sh`, `docker-status.sh`) reads that
+file instead of `setup/.env`, e.g. a project that deploys its own server.
+
 `.env` may be a symlink to an env file shared with other projects: only the
 variables in `COMPUTE_ENV_VARS` ([env-lib.sh](env-lib.sh)) are read, the file
 is parsed, never sourced, and lines of other tools are ignored.

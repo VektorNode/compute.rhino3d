@@ -15,7 +15,8 @@
 # sudo (x86-64 for current Rhino builds). The first deploy runs server-init.sh
 # there to install Docker.
 #
-# setup/.env (gitignored; template .env.example) also holds the local settings:
+# setup/.env (gitignored; template .env.example), or the file named by ENV_FILE=/path/.env,
+# also holds the local settings:
 #   DEPLOY_HOST    - ssh destination, e.g. deploy@203.0.113.10
 #   DEPLOY_DIR     - checkout on the server, relative to its home (default: compute.rhino3d)
 #   DEPLOY_PLUGINS - comma-separated local plugin build folders to ship
@@ -38,7 +39,7 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-ENV_FILE="$SCRIPT_DIR/.env"
+ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/env-lib.sh"
 
@@ -52,7 +53,7 @@ server_value() { # server_value NAME → SERVER_NAME if set, else NAME
     printf '%s' "$v"
 }
 
-[ -f "$ENV_FILE" ] || die "setup/.env not found — cp .env.example .env and fill it in."
+[ -f "$ENV_FILE" ] || die "$ENV_FILE not found — cp setup/.env.example setup/.env and fill it in."
 
 DEPLOY_HOST="$(env_value "$ENV_FILE" DEPLOY_HOST)"
 DEPLOY_DIR="$(env_value "$ENV_FILE" DEPLOY_DIR)"; DEPLOY_DIR="${DEPLOY_DIR:-compute.rhino3d}"

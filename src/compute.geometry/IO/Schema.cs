@@ -46,17 +46,6 @@ namespace Resthopper.IO
         [JsonProperty(PropertyName = "cachesolve")]
         public bool CacheSolve { get; set; } = false;
 
-        // VEKTORNODE: CACHE-ERRORED-SOLVES — opt-in. By default an errored solve
-        // (definition.HasErrors) is never cached, because an error usually means a
-        // bad result. But many definitions throw GH errors BY DESIGN (a guarded
-        // Python component, a filtered/branch-pruned component) while still
-        // producing correct geometry. For those, the author can set this to true so
-        // the completed result is cached despite the errors. Only honored together
-        // with CacheSolve. Does NOT change the HTTP status (an errored solve still
-        // returns 500); it only allows the result into the solve cache.
-        [JsonProperty(PropertyName = "cacheerroredsolves")]
-        public bool CacheErroredSolves { get; set; } = false;
-
         // Used for nested calls
         [JsonProperty(PropertyName = "recursionlevel", DefaultValueHandling = DefaultValueHandling.Ignore)]
         public int RecursionLevel { get; set; } = 0;

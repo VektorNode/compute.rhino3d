@@ -225,6 +225,17 @@ up to a whole span, and core-hour billing runs for all of it: a 5-minute span bi
 child now asks at least every `MaxSpanCheckSeconds` (30), so it exits within 30 s of the span.
 Same as `9.x.selva` §15.
 
+### 20. Limits a client can read (SELVA)
+**Files:** `src/rhino.compute/ReverseProxy.cs` — `MapEndpoints`; `src/compute.geometry/FixedEndpoints.cs` — `GetLimits`
+
+Upstream gives a client no way to learn the server's timeout or body cap, so Selva carried its own
+copies of both, and an operator had to keep two sets of numbers in step. A copy set higher than the
+server's ended in a bare 413 or 502. `GET /limits` returns `timeoutSeconds` (`RHINO_COMPUTE_TIMEOUT`
+or `--timeout`), `maxRequestBytes` (`RHINO_COMPUTE_MAX_REQUEST_SIZE` or `--max-request-size`) and
+`signalsStaleDefinition` (a stale definition pointer answers `definition_not_cached`, see §11).
+`rhino.compute` answers it itself, because its own timeout and body cap are what a request meets
+first; a child reached directly answers with its own config. Same as `9.x.selva` §21.
+
 ## Non-source divergence
 
 Repo/tooling files with no upstream counterpart, or deliberately changed:

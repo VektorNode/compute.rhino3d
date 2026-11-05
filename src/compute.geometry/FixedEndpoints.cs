@@ -21,6 +21,7 @@ namespace compute.geometry
         {
             app.MapGet("", HomePage);
             app.MapGet("version", GetVersion);
+            app.MapGet("limits", GetLimits); // VEKTORNODE: SELVA — see FORK_CHANGES.md
             app.MapGet("servertime", ServerTime);
             app.MapGet("plugins/rhino/installed", GetInstalledPluginsRhino);
             app.MapGet("plugins/gh/installed", GetInstalledPluginsGrasshopper);
@@ -49,6 +50,19 @@ namespace compute.geometry
 
             ctx.Response.ContentType= "application/json";
             await ctx.Response.WriteAsJsonAsync(values);
+        }
+
+        // VEKTORNODE: SELVA — limits a client must stay within, for a child reached directly.
+        // Under rhino.compute the parent answers /limits itself, with the limits a request
+        // meets first.
+        static async Task GetLimits(HttpContext ctx)
+        {
+            await ctx.Response.WriteAsJsonAsync(new
+            {
+                timeoutSeconds = Config.RequestTimeout,
+                maxRequestBytes = Config.MaxRequestSize,
+                signalsStaleDefinition = true,
+            });
         }
 
         static async Task ServerTime(HttpContext ctx)

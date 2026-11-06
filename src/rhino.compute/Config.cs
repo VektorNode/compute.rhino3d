@@ -126,6 +126,19 @@ namespace rhino.compute
         /// </summary>
         public static bool AbortOnHangUp { get; private set; }
 
+        // VEKTORNODE: SELVA — session affinity, see FORK_CHANGES §22.
+        /// <summary>
+        /// RHINO_COMPUTE_SESSION_TIMEOUT: seconds an X-Session-Id claim on a child outlives its last
+        /// request. Default 3600, the default idle span. 0 keeps no claim between requests.
+        /// </summary>
+        public static int SessionTimeout { get; private set; }
+
+        /// <summary>
+        /// RHINO_COMPUTE_SESSION_MAX_CLAIMS: cap on X-Session-Id claims; past it, requests route as if
+        /// they had no session. Default 256. 0 turns session affinity off.
+        /// </summary>
+        public static int SessionMaxClaims { get; private set; }
+
         /// <summary>
         /// RHINO_MCP_AUTOSTART_PORT: turns on the /mcp route. The value is the loopback port the
         /// dedicated MCP child's RhinoAI listener is asked to bind; the plug-in reads the same
@@ -194,6 +207,9 @@ namespace rhino.compute
             Compression = GetEnvironmentVariable(RHINO_COMPUTE_COMPRESSION, true);
             // VEKTORNODE: SELVA — abort on hang-up.
             AbortOnHangUp = GetEnvironmentVariable(RHINO_COMPUTE_ABORT_ON_HANGUP, false);
+            // VEKTORNODE: SELVA — session affinity.
+            SessionTimeout = GetEnvironmentVariable(RHINO_COMPUTE_SESSION_TIMEOUT, 3600);
+            SessionMaxClaims = GetEnvironmentVariable(RHINO_COMPUTE_SESSION_MAX_CLAIMS, 256);
 
             McpPort = GetEnvironmentVariable(RHINO_MCP_AUTOSTART_PORT, 0);
             if (McpPort < 0 || McpPort > 65535)
@@ -227,6 +243,8 @@ namespace rhino.compute
         const string RHINO_COMPUTE_IDLESPAN = "RHINO_COMPUTE_IDLESPAN";
         const string RHINO_COMPUTE_COMPRESSION = "RHINO_COMPUTE_COMPRESSION";
         const string RHINO_COMPUTE_ABORT_ON_HANGUP = "RHINO_COMPUTE_ABORT_ON_HANGUP";
+        const string RHINO_COMPUTE_SESSION_TIMEOUT = "RHINO_COMPUTE_SESSION_TIMEOUT";
+        const string RHINO_COMPUTE_SESSION_MAX_CLAIMS = "RHINO_COMPUTE_SESSION_MAX_CLAIMS";
 
         // Shared with the RhinoAI plug-in (MCPSpawnCommand.PortEnvVar): it is the variable the
         // plug-in reads to start its listener, so one setting opts the whole stack in.

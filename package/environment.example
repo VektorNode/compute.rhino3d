@@ -19,6 +19,13 @@ RHINO_COMPUTE_CREATE_HEADLESS_DOC=true
 # RHINO_COMPUTE_MAX_REQUEST_SIZE=52428800
 # RHINO_COMPUTE_TIMEOUT=100
 
+# Optional: X-Session-Id routing. Requests with the header return to the child holding the session's
+# warm document; one that finds that child busy runs on another, and the session moves there.
+# Seconds a claim outlives its last request (default 3600)
+# RHINO_COMPUTE_SESSION_TIMEOUT=3600
+# Maximum claims; 0 turns the routing off (default 256)
+# RHINO_COMPUTE_SESSION_MAX_CLAIMS=256
+
 # Optional: serve the RhinoAI MCP server at POST /mcp (Streamable HTTP, JSON responses).
 # Each compute.geometry child binds its MCP listeners on loopback in a block of 100 ports starting
 # here (first child = this port, second = +100, ...), so keep that range free. Leave unset to keep /mcp off.

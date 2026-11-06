@@ -379,6 +379,44 @@ or `--timeout`), `maxRequestBytes` (`RHINO_COMPUTE_MAX_REQUEST_SIZE` or `--max-r
 §7). `rhino.compute` answers it itself, because its own timeout and body cap are what
 a request meets first; a child reached directly answers with its own config.
 
+### 22. Requests with `X-Session-Id` return to their child (SELVA)
+
+**Files:** `src/rhino.compute/ComputeChildren.cs` — `AcquireChild(sessionId)`, `TakeChild`, `EnsurePoolCapacity`;
+`src/rhino.compute/ReverseProxy.cs` — `ReverseProxyHandler`, `SessionIdFrom`;
+`src/rhino.compute/Config.cs`; `package/environment.example`
+
+Upstream picks a child with no regard for who is asking: the first idle one, which is whichever
+finished last. A child's cached `GH_Document` keeps its last inputs and outputs, so a solve there
+reruns only what changed, but that warmth holds only until two users overlap. They then trade
+children and solve cold. The solve-result cache doesn't help, since a live solve never hits it (§11).
+
+A request with `X-Session-Id` now goes to the child that session last used. The claim is a
+preference, not a taint, because the state is only a cache: a request never fails over a claim, and
+a child with claims can still serve anyone when nothing else is free. Exclusive claims would strand
+new sessions on a full pool and starve nested Hops calls, which carry no session header. Requests
+without the header route as before, and with no claims `TakeChild` chooses exactly as it did.
+
+- A claim names a child by port and process id, as MCP sessions do: a replacement reuses the port.
+- A new claim prefers the least-claimed idle child, and anonymous requests avoid claimed children
+  the same way.
+- A claimed child that is busy, even with the session's own earlier request, sends the request to
+  another child (`spilled`), and the claim moves there, as that child now has the session's newest
+  inputs. A new request never waits for, or cancels, one already running: affinity is for clients
+  that wait for each result before the next change, and it is independent of
+  `RHINO_COMPUTE_ABORT_ON_HANGUP` (§19). A spill can also settle sessions that bunched on the first
+  ready child.
+- A 504 drops the claim and sends the child to the back of the queue, as it may still be running
+  the abandoned solve.
+- Session hits bypass `SelectChild`, so `EnsurePoolCapacity` is split out of it for them to refill the pool.
+- Session requests skip `MoveToFrontOfQueue`: at the front, a claimed child would be everyone's
+  first choice.
+- Each routed request logs its outcome at Debug: `hit`, `claimed`, `spilled` or `none`, with the
+  port and an 8-character hash of the session id (the id may name a user). Clients see no new header.
+
+Claims live in the `rhino.compute` process, so several hosts would need load-balancer affinity on
+the same header. Claims keep nothing alive: the idle span still covers the whole pool. They are for
+routing only and isolate nothing, as sessions sharing a child share its process and caches.
+
 ---
 
 ## Non-source divergence

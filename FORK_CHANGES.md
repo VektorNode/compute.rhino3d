@@ -337,6 +337,10 @@ or `--timeout`), `maxRequestBytes` (`RHINO_COMPUTE_MAX_REQUEST_SIZE` or `--max-r
 §7). `rhino.compute` answers it itself, because its own timeout and body cap are what
 a request meets first; a child reached directly answers with its own config.
 
+`deploymentId` is new on every process start and, in `rhino.compute`, on `/shutdown-children` or
+`/recycle-children`: the ways a plugin is redeployed. Selva drops cached solve results when it
+changes. A plugin swapped on disk while children sit idle-exited is not seen.
+
 ---
 
 ## Non-source divergence

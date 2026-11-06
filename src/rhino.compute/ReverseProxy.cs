@@ -94,12 +94,14 @@ namespace rhino.compute
             app.MapGet("/activechildren", ActiveChildrenEndpoint);
             app.MapGet("/active-children", ActiveChildrenEndpoint);
             // VEKTORNODE: SELVA — limits a client must stay within. Answered here, not by a child:
-            // this process's timeout and body cap are the ones a request meets first.
+            // this process's timeout and body cap are the ones a request meets first, and asking
+            // never wakes a child.
             app.MapGet("/limits", async (HttpResponse res) => await res.WriteAsJsonAsync(new
             {
                 timeoutSeconds = Config.ReverseProxyRequestTimeout,
                 maxRequestBytes = Config.MaxRequestSize,
                 signalsStaleDefinition = true,
+                deploymentId = s_deploymentId,
             }));
             app.MapGet("/launch", LaunchChildren);
             app.MapGet("/favicon.ico", async (context) => await context.Response.WriteAsync("Handled"));
@@ -133,6 +135,13 @@ namespace rhino.compute
             app.MapPost("/{*uri}", (HttpRequest req, HttpResponse res) => ProxyRequest(req, res, HttpMethod.Post));
         }
 
+        // VEKTORNODE: SELVA — names what loaded the plugins (FORK_CHANGES §20). New on every start and on a
+        // /shutdown-children or /recycle-children, the two ways a plugin is redeployed, so a client
+        // caching solve results drops those from another deployment.
+        static string s_deploymentId = Guid.NewGuid().ToString("N");
+
+        static void RotateDeploymentId() => s_deploymentId = Guid.NewGuid().ToString("N");
+
         // GET /activechildren and GET /active-children — report the number of compute.geometry
         // children READY TO SERVE (port open, in the pool) as a plain integer body. Always 200:
         // this is a query that always succeeds and "0" is a valid answer (no children ready yet),
@@ -161,6 +170,7 @@ namespace rhino.compute
                 return;
             }
             var (shutdown, _) = ComputeChildren.ShutdownChildren(portFilter, respawn: false);
+            if (shutdown.Length > 0) RotateDeploymentId();
             await res.WriteAsJsonAsync(new
             {
                 shutdown,
@@ -180,6 +190,7 @@ namespace rhino.compute
                 return;
             }
             var (shutdown, spawned) = ComputeChildren.ShutdownChildren(portFilter, respawn: true);
+            if (shutdown.Length > 0) RotateDeploymentId();
             await res.WriteAsJsonAsync(new
             {
                 shutdown,

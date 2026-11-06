@@ -62,8 +62,12 @@ namespace compute.geometry
                 timeoutSeconds = Config.RequestTimeout,
                 maxRequestBytes = Config.MaxRequestSize,
                 signalsStaleDefinition = true,
+                deploymentId = s_deploymentId,
             });
         }
+
+        // A child reached directly loaded its plugins once, at start.
+        static readonly string s_deploymentId = Guid.NewGuid().ToString("N");
 
         static async Task ServerTime(HttpContext ctx)
         {

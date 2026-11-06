@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -384,6 +385,26 @@ namespace rhino.compute
         }
         // ── END   VEKTORNODE: SELVA — solve timing ──
 
+        // ── BEGIN VEKTORNODE: SELVA — session affinity, see FORK_CHANGES §22 ──
+        const string SessionHeader = "X-Session-Id";
+        const int MaxSessionIdLength = 128;
+
+        // The caller's session id, or null to route as usual. The id is only a routing hint, so one
+        // that is malformed is not an error: the request still runs, without a claim.
+        static string SessionIdFrom(HttpRequest req)
+        {
+            if (!req.Headers.TryGetValue(SessionHeader, out var values))
+                return null;
+            string id = values.ToString();
+            if (id.Length == 0 || id.Length > MaxSessionIdLength || id.Any(c => c <= ' ' || c > '~'))
+            {
+                Log.Warning("Ignoring a malformed {Header} header (length {Length})", SessionHeader, id.Length);
+                return null;
+            }
+            return id;
+        }
+        // ── END   VEKTORNODE: SELVA — session affinity ──
+
         // Shared proxy handler: forwards the request to a compute.geometry child, propagates
         // the response status code, and promotes the responding child to the front of the queue
         // on success so it is preferred for the next round-robin selection.
@@ -393,6 +414,7 @@ namespace rhino.compute
             await AwaitInitTask();
             long initMs = stopwatch.ElapsedMilliseconds;
             string responseString;
+            string sessionId = SessionIdFrom(req); // VEKTORNODE: SELVA — session affinity
             try
             {
                 using (new ConcurrentRequestTracker())
@@ -415,7 +437,9 @@ namespace rhino.compute
                     for (int attempt = 0; ; attempt++)
                     {
                         long acquireStart = stopwatch.ElapsedMilliseconds;
-                        using (var child = ComputeChildren.AcquireChild())
+                        // VEKTORNODE: SELVA — session affinity. After an eviction below, the claim's child is
+                        // gone, so the retry claims another, and each attempt logs its own outcome.
+                        using (var child = ComputeChildren.AcquireChild(sessionId))
                         {
                             long childStart = stopwatch.ElapsedMilliseconds;
                             HttpResponseMessage proxyResponse;
@@ -437,8 +461,11 @@ namespace rhino.compute
                                 // VEKTORNODE: SELVA FIX — a solve that finished with Grasshopper errors answers 500
                                 // but carries Server-Timing (an exception's 500 does not). That child is healthy and
                                 // holds the caller's warm document, so it stays first like a 200 would.
-                                if (proxyResponse.StatusCode == System.Net.HttpStatusCode.OK
-                                    || proxyResponse.Headers.Contains("Server-Timing"))
+                                // VEKTORNODE: SELVA — session affinity: a session's child is found by its claim,
+                                // and at the front it would be the first choice for everyone else.
+                                if (sessionId == null
+                                    && (proxyResponse.StatusCode == System.Net.HttpStatusCode.OK
+                                        || proxyResponse.Headers.Contains("Server-Timing")))
                                     ComputeChildren.MoveToFrontOfQueue(child.Port);
 
                                 res.StatusCode = (int)proxyResponse.StatusCode;
@@ -479,6 +506,8 @@ namespace rhino.compute
                     // HttpClient timeout (TaskCanceledException extends OperationCanceledException):
                     // the client did not cancel — return 504 so the caller knows the backend didn't respond in time.
                     Log.Warning("{Method} request to compute child timed out: {Path}", method, req.Path);
+                    if (sessionId != null)
+                        ComputeChildren.DropSessionClaim(sessionId); // VEKTORNODE: SELVA — session affinity
                     res.StatusCode = StatusCodes.Status504GatewayTimeout;
                     await res.WriteAsync("Gateway timeout: compute child did not respond in time.");
                 }

@@ -212,6 +212,10 @@ namespace compute.geometry
                 // Empty for the same reason: the plugin writes the solve's verdict here, and a stale
                 // one would be returned as this solve's.
                 definition.Definition.DefineConstant("SelvaOutcome", new Grasshopper.Kernel.Expressions.GH_Variant(string.Empty));
+                // Empty when absent for the same reason: a reused document must not keep the
+                // previous request's preview mode and drop this caller's files.
+                definition.Definition.DefineConstant("SelvaMode", new Grasshopper.Kernel.Expressions.GH_Variant(
+                    input.SelvaMode == "preview" ? "preview" : string.Empty));
                 // ── END   VEKTORNODE: SELVA — live events ──
 
                 definition.SetInputs(input);

@@ -382,7 +382,7 @@ a request meets first; a child reached directly answers with its own config.
 ### 22. Requests with `X-Session-Id` return to their child (SELVA)
 
 **Files:** `src/rhino.compute/ComputeChildren.cs` — `AcquireChild(sessionId)`, `TakeChild`, `EnsurePoolCapacity`;
-`src/rhino.compute/ReverseProxy.cs` — `ReverseProxyHandler`, `SessionIdFrom`;
+`src/rhino.compute/ReverseProxy.cs` — `ReverseProxyHandler`, `SessionIdFrom`, `ForwardTiming`;
 `src/rhino.compute/Config.cs`; `package/environment.example`
 
 Upstream picks a child with no regard for who is asking: the first idle one, which is whichever
@@ -406,12 +406,24 @@ without the header route as before, and with no claims `TakeChild` chooses exact
   `RHINO_COMPUTE_ABORT_ON_HANGUP` (§19). A spill can also settle sessions that bunched on the first
   ready child.
 - A 504 drops the claim and sends the child to the back of the queue, as it may still be running
-  the abandoned solve.
+  the abandoned solve. So does a 5xx without `Server-Timing`, which is the child failing rather than
+  a solve with Grasshopper errors: kept, the claim would send the session back to it on every
+  request until the claim expired. A `definition_not_cached` 500 is the exception: a healthy child
+  answers it after a spill, and the client's re-upload should go to that child. Either drop removes
+  the claim only if it still names the child that failed, as a concurrent request may have moved it
+  to a healthy one.
+- At the claim cap (`RHINO_COMPUTE_SESSION_MAX_CLAIMS`), a new claim replaces the one seen longest
+  ago. Turning newcomers away instead kept claims of sessions gone for up to the timeout, while
+  active ones routed blind.
 - Session hits bypass `SelectChild`, so `EnsurePoolCapacity` is split out of it for them to refill the pool.
 - Session requests skip `MoveToFrontOfQueue`: at the front, a claimed child would be everyone's
   first choice.
-- Each routed request logs its outcome at Debug: `hit`, `claimed`, `spilled` or `none`, with the
-  port and an 8-character hash of the session id (the id may name a user). Clients see no new header.
+- Each routed request reports its outcome as `affinity;desc=hit` (or `claimed`, `spilled`, `none`)
+  in `Server-Timing`, so a client can check routing without the proxy's log. It is also logged at
+  Debug with the port and an 8-character hash of the session id (the id may name a user).
+
+A child that lost its Rhino licence still answers 200, with every output empty and no error, so
+none of this notices it: the claim keeps the session on that child until the process is replaced.
 
 Claims live in the `rhino.compute` process, so several hosts would need load-balancer affinity on
 the same header. Claims keep nothing alive: the idle span still covers the whole pool. They are for

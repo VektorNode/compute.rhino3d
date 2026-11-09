@@ -374,7 +374,8 @@ namespace rhino.compute
         // `child` is the child's round trip, body included.
         static readonly string[] ForwardedTimingHeaders = { "Server-Timing", "X-Compute-Profile" };
 
-        static void ForwardTiming(HttpResponseMessage from, HttpResponse to, long initMs, long readMs, long waitMs, long childMs)
+        static void ForwardTiming(HttpResponseMessage from, HttpResponse to, long initMs, long readMs, long waitMs, long childMs,
+            string affinity)
         {
             foreach (var name in ForwardedTimingHeaders)
                 if (from.Headers.TryGetValues(name, out var values))
@@ -382,6 +383,10 @@ namespace rhino.compute
                         to.Headers.Append(name, value);
             to.Headers.Append("Server-Timing",
                 $"proxy_init;dur={initMs}, proxy_read;dur={readMs}, proxy_wait;dur={waitMs}, proxy_child;dur={childMs}");
+            // VEKTORNODE: SELVA — session affinity: the routing outcome, so a client can check it
+            // without the proxy's Debug log.
+            if (affinity != null)
+                to.Headers.Append("Server-Timing", $"affinity;desc={affinity}");
         }
         // ── END   VEKTORNODE: SELVA — solve timing ──
 
@@ -415,6 +420,7 @@ namespace rhino.compute
             long initMs = stopwatch.ElapsedMilliseconds;
             string responseString;
             string sessionId = SessionIdFrom(req); // VEKTORNODE: SELVA — session affinity
+            int childPort = 0; // VEKTORNODE: SELVA — session affinity: the timeout below drops only this child's claim
             try
             {
                 using (new ConcurrentRequestTracker())
@@ -441,6 +447,7 @@ namespace rhino.compute
                         // gone, so the retry claims another, and each attempt logs its own outcome.
                         using (var child = ComputeChildren.AcquireChild(sessionId))
                         {
+                            childPort = child.Port;
                             long childStart = stopwatch.ElapsedMilliseconds;
                             HttpResponseMessage proxyResponse;
                             try
@@ -475,7 +482,17 @@ namespace rhino.compute
                                     res.ContentType = proxyResponse.Content.Headers.ContentType.ToString();
                                 responseString = await proxyResponse.Content.ReadAsStringAsync();
                                 ForwardTiming(proxyResponse, res, initMs, readMs,
-                                    childStart - acquireStart, stopwatch.ElapsedMilliseconds - childStart);
+                                    childStart - acquireStart, stopwatch.ElapsedMilliseconds - childStart, child.Affinity);
+
+                                // VEKTORNODE: SELVA — session affinity: a 5xx without Server-Timing is the child
+                                // failing, not a solve with Grasshopper errors. Left in place, the claim would send
+                                // the session back to that child on every request until it expires.
+                                // definition_not_cached is excluded: a healthy child answers it after a spill,
+                                // and the client's re-upload should land on that same child.
+                                if (sessionId != null && (int)proxyResponse.StatusCode >= 500
+                                    && !proxyResponse.Headers.Contains("Server-Timing")
+                                    && !responseString.Contains("\"definition_not_cached\""))
+                                    ComputeChildren.DropSessionClaim(sessionId, child.Port);
 
                                 // VEKTORNODE: SELVA FIX — the child's error body went to the caller only, so a
                                 // failed solve was undiagnosable from the parent log.
@@ -507,7 +524,7 @@ namespace rhino.compute
                     // the client did not cancel — return 504 so the caller knows the backend didn't respond in time.
                     Log.Warning("{Method} request to compute child timed out: {Path}", method, req.Path);
                     if (sessionId != null)
-                        ComputeChildren.DropSessionClaim(sessionId); // VEKTORNODE: SELVA — session affinity
+                        ComputeChildren.DropSessionClaim(sessionId, childPort); // VEKTORNODE: SELVA — session affinity
                     res.StatusCode = StatusCodes.Status504GatewayTimeout;
                     await res.WriteAsync("Gateway timeout: compute child did not respond in time.");
                 }

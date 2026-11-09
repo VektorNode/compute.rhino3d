@@ -161,10 +161,10 @@ namespace rhino.compute
 
         /// <summary>
         /// Lease the child this session last solved on, or claim one for it; with no session, the
-        /// same as <see cref="AcquireChild()"/>. The outcome is logged at Debug: <c>hit</c> (the
-        /// claimed child), <c>claimed</c> (a first claim, or the claimed child is gone or expired),
-        /// <c>spilled</c> (the claimed child was busy, so the claim moved) or <c>none</c> (routed
-        /// without a claim: the claim cap, or a concurrent first request won it).
+        /// same as <see cref="AcquireChild()"/>. The outcome is logged at Debug and kept on the lease:
+        /// <c>hit</c> (the claimed child), <c>claimed</c> (a first claim, or the claimed child is gone
+        /// or expired), <c>spilled</c> (the claimed child was busy, so the claim moved) or <c>none</c>
+        /// (routed without a claim: routing is off, or a concurrent first request won it).
         /// </summary>
         public static ChildLease AcquireChild(string sessionId)
         {
@@ -192,7 +192,7 @@ namespace rhino.compute
                     {
                         activeRequests[claim.Port] = 1;
                         claim.LastSeen = DateTime.Now;
-                        pinned = new ChildLease($"http://localhost:{claim.Port}", claim.Port);
+                        pinned = new ChildLease($"http://localhost:{claim.Port}", claim.Port) { Affinity = "hit" };
                     }
                 }
             }
@@ -211,14 +211,19 @@ namespace rhino.compute
             lock (lockObject)
             {
                 int processId = ChildProcessId(port);
-                if (processId != 0 && !sessionClaims.ContainsKey(sessionId) && sessionClaims.Count < Config.SessionMaxClaims)
+                if (processId != 0 && !sessionClaims.ContainsKey(sessionId) && Config.SessionMaxClaims > 0)
                 {
+                    // A full cap makes room rather than turning the newcomer away: the claim seen
+                    // longest ago belongs to whoever is least likely to come back.
+                    if (sessionClaims.Count >= Config.SessionMaxClaims)
+                        sessionClaims.Remove(sessionClaims.MinBy(c => c.Value.LastSeen).Key);
                     sessionClaims[sessionId] = new SessionClaim { Port = port, ProcessId = processId, LastSeen = DateTime.Now };
                     created = true;
                 }
             }
-            LogSessionRouting(sessionId, port, !created ? "none" : spilled ? "spilled" : "claimed");
-            return new ChildLease(url, port);
+            var outcome = !created ? "none" : spilled ? "spilled" : "claimed";
+            LogSessionRouting(sessionId, port, outcome);
+            return new ChildLease(url, port) { Affinity = outcome };
         }
 
         static void LogSessionRouting(string sessionId, int port, string outcome)
@@ -231,15 +236,18 @@ namespace rhino.compute
             => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(id))).Substring(0, 8);
 
         /// <summary>
-        /// Forget a session's claim after its request timed out: the child is probably still running
-        /// the abandoned solve, so it also goes to the back of the queue, away from the next selection.
+        /// Forget a session's claim after its request timed out or its child failed: the child is
+        /// probably still running the abandoned solve, or unwell, so it also goes to the back of the
+        /// queue, away from the next selection. Only a claim still on <paramref name="port"/> goes: a
+        /// concurrent request may have moved it to a healthy child since.
         /// </summary>
-        public static void DropSessionClaim(string sessionId)
+        public static void DropSessionClaim(string sessionId, int port)
         {
             lock (lockObject)
             {
-                if (!sessionClaims.Remove(sessionId, out var claim))
+                if (!sessionClaims.TryGetValue(sessionId, out var claim) || claim.Port != port)
                     return;
+                sessionClaims.Remove(sessionId);
                 computeProcesses = new Queue<Tuple<Process, int>>(
                     computeProcesses.Where(t => t.Item2 != claim.Port).Concat(computeProcesses.Where(t => t.Item2 == claim.Port)));
             }
@@ -275,6 +283,9 @@ namespace rhino.compute
 
             public string BaseUrl { get; }
             public int Port { get; }
+
+            // VEKTORNODE: SELVA — session affinity: how this lease was routed, null without a session.
+            public string Affinity { get; init; }
 
             public void Dispose()
             {

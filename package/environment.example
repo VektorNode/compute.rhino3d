@@ -23,7 +23,7 @@ RHINO_COMPUTE_CREATE_HEADLESS_DOC=true
 # warm document; one that finds that child busy runs on another, and the session moves there.
 # Seconds a claim outlives its last request (default 3600)
 # RHINO_COMPUTE_SESSION_TIMEOUT=3600
-# Maximum claims; 0 turns the routing off (default 256)
+# Maximum claims; past it a new one replaces the one seen longest ago; 0 turns the routing off (default 256)
 # RHINO_COMPUTE_SESSION_MAX_CLAIMS=256
 
 # Optional: serve the RhinoAI MCP server at POST /mcp (Streamable HTTP, JSON responses).

@@ -134,8 +134,8 @@ namespace rhino.compute
         public static int SessionTimeout { get; private set; }
 
         /// <summary>
-        /// RHINO_COMPUTE_SESSION_MAX_CLAIMS: cap on X-Session-Id claims; past it, requests route as if
-        /// they had no session. Default 256. 0 turns session affinity off.
+        /// RHINO_COMPUTE_SESSION_MAX_CLAIMS: cap on X-Session-Id claims; past it, a new claim replaces
+        /// the one seen longest ago. Default 256. 0 turns session affinity off.
         /// </summary>
         public static int SessionMaxClaims { get; private set; }
 

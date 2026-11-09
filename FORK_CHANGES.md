@@ -429,6 +429,24 @@ Claims live in the `rhino.compute` process, so several hosts would need load-bal
 the same header. Claims keep nothing alive: the idle span still covers the whole pool. They are for
 routing only and isolate nothing, as sessions sharing a child share its process and caches.
 
+### 23. Solve mode as a document constant (SELVA)
+
+**Files:** `src/compute.geometry/IO/Schema.cs` (`Schema.SelvaMode`),
+`src/compute.geometry/ResthopperEndpoints.cs` (`SelvaMode` next to the #11 and #13 constants)
+
+Every upstream solve makes every output, so a definition that exports files pays for the export on
+every edit, though nobody downloads after most of them. A Selva page now solves its edits as
+previews: the request carries `selvamode: "preview"`, compute hands it to the document as the
+`SelvaMode` constant, and the Selva plugin skips the file components that only feed a Download
+button. The download is a second request without the field. Compute never interprets the mode.
+
+- `SelvaMode` is defined on **every** request, `"preview"` or empty, like the #11 constants: a
+  reused document must not keep the previous caller's mode.
+- Only the exact value `preview` passes through, so a caller can't put arbitrary text into a
+  constant every definition can read.
+- `cachesolve` keys on the raw body, so a preview and a full solve of the same inputs never share
+  an entry.
+
 ---
 
 ## Non-source divergence

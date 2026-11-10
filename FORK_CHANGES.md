@@ -240,6 +240,15 @@ first; a child reached directly answers with its own config. Same as `9.x.selva`
 `/recycle-children`: the ways a plugin is redeployed. Selva drops cached solve results when it
 changes. A plugin swapped on disk while children sit idle-exited is not seen.
 
+### 21. Children find the parent under `ASPNETCORE_URLS` (SELVA FIX)
+**File:** `src/rhino.compute/Program.cs` — `Main`, `ListenPort`
+
+Upstream sets `ComputeChildren.ParentPort` only from `--port`. A parent bound through
+`ASPNETCORE_URLS` instead keeps the default 5000, so a child asks a dead `/idlespan`, swallows the
+error and never exits: `--idlespan` has no effect. Without `--port`, the parent port now comes from
+`ASPNETCORE_URLS`. The IIS deploy passes `--port` and is unaffected. Same as `9.x.selva` §22, where
+`start.sh` binds with `--urls` and hit it.
+
 ## Non-source divergence
 
 Repo/tooling files with no upstream counterpart, or deliberately changed:

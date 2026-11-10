@@ -343,6 +343,15 @@ changes. A plugin swapped on disk while children sit idle-exited is not seen.
 
 ---
 
+### 22. Children find the parent under `--urls` (SELVA FIX)
+
+**File:** `src/rhino.compute/Program.cs` — `Main`, `ListenPort`
+
+Upstream sets `ComputeChildren.ParentPort` only from `--port`. A parent started with `--urls`
+(`start.sh`: `http://0.0.0.0:6500`) keeps the default 5000, so a child asks a dead `/idlespan`,
+swallows the error and never exits: `--idlespan` had no effect and every idle minute was billed.
+Without `--port`, the parent port now comes from `--urls` or `ASPNETCORE_URLS`.
+
 ## Non-source divergence
 
 Tooling and docs with no upstream counterpart:

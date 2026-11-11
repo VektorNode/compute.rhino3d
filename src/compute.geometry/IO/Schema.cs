@@ -58,6 +58,12 @@ namespace Resthopper.IO
         [JsonProperty(PropertyName = "selvaevents", DefaultValueHandling = DefaultValueHandling.Ignore)]
         public SelvaEventTarget SelvaEvents { get; set; }
 
+        // VEKTORNODE: SELVA — solve mode. `"preview"` lets the Selva plugin skip files only a
+        // Download button needs; absent means a full solve. Handed to the document as the
+        // `SelvaMode` constant. Input-only; never echoed back.
+        [JsonProperty(PropertyName = "selvamode", DefaultValueHandling = DefaultValueHandling.Ignore)]
+        public string SelvaMode { get; set; }
+
         // VEKTORNODE: SELVA — solve outcome. Output-only: `{ outcome }`, where outcome is the
         // Selva plugin's verdict on the solve, copied verbatim from the `SelvaOutcome` document
         // constant (see GrasshopperDefinition.Solve). Absent when no Selva plugin wrote one.

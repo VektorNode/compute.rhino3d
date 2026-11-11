@@ -165,8 +165,12 @@ namespace compute.geometry
             var shared = definition;
             definition = shared.CheckOut();
             RhinoDoc headlessDoc = null, previousDoc = null;
+            // VEKTORNODE: SELVA — abort on hang-up, opt-in (see Config.AbortOnHangUp).
+            var hangUp = Config.AbortOnHangUp ? ctx.RequestAborted : System.Threading.CancellationToken.None;
             try
             {
+                // VEKTORNODE: SELVA — a caller that hung up while queued on the solve lock costs no input decoding.
+                hangUp.ThrowIfCancellationRequested();
                 // Instantiate headless doc
                 if (Config.CreateHeadlessDoc)
                 {
@@ -203,6 +207,10 @@ namespace compute.geometry
                 // Empty for the same reason: the plugin writes the solve's verdict here, and a stale
                 // one would be returned as this solve's.
                 definition.Definition.DefineConstant("SelvaOutcome", new Grasshopper.Kernel.Expressions.GH_Variant(string.Empty));
+                // Empty when absent for the same reason: a reused document must not keep the
+                // previous request's preview mode and drop this caller's files.
+                definition.Definition.DefineConstant("SelvaMode", new Grasshopper.Kernel.Expressions.GH_Variant(
+                    input.SelvaMode == "preview" ? "preview" : string.Empty));
                 // ── END   VEKTORNODE: SELVA — live events ──
 
                 definition.SetInputs(input.Values);
@@ -212,18 +220,22 @@ namespace compute.geometry
                 if (!String.IsNullOrEmpty(input.FileName))
                     fileNameMsg = $" {input.FileName}";
                 Serilog.Log.Debug($"Solving definition{fileNameMsg}...");
-                var output = definition.Solve(input.DataVersion);
+                // VEKTORNODE: SELVA — a hang-up aborts the solve; a finished solve still gets encoded and cached.
+                var output = definition.Solve(input.DataVersion, hangUp);
                 output.Pointer = definition.CacheKey;
                 long solveTime = stopwatch.ElapsedMilliseconds;
                 stopwatch.Restart();
                 string returnJson = JsonConvert.SerializeObject(output, GeometryResolver.Settings(input.DataVersion));
                 long encodeTime = stopwatch.ElapsedMilliseconds;
-                ctx.Response.Headers["Server-Timing"] = $"decode;dur={decodeTime}, solve;dur={solveTime}, encode;dur={encodeTime}";
+                // VEKTORNODE: SELVA — solve timing: `recomputed` is ran/total objects, see FORK_CHANGES §25.
+                ctx.Response.Headers["Server-Timing"] = $"decode;dur={decodeTime}, solve;dur={solveTime}, encode;dur={encodeTime}, " +
+                    $"recomputed;desc=\"{definition.LastRecomputedObjects}/{definition.LastActiveObjects}\"";
                 if (definition.HasErrors)
                     ctx.Response.StatusCode = 500; // internal server error
                 else
                 {
-                    if (input.CacheSolve)
+                    // VEKTORNODE: SELVA — an aborted solve's outputs are partial; the same inputs must solve again.
+                    if (input.CacheSolve && !definition.Definition.AbortRequested)
                     {
                         Serilog.Log.Debug("Caching solve results");
                         DataCache.SetCachedSolveResults(body, returnJson, shared);
@@ -231,6 +243,12 @@ namespace compute.geometry
                 }
 
                 return returnJson;
+            }
+            catch (OperationCanceledException) when (hangUp.IsCancellationRequested)
+            {
+                // VEKTORNODE: SELVA — nobody is left to answer, and an abandoned solve is not cached.
+                Serilog.Log.Debug("Caller hung up; solve abandoned");
+                return null;
             }
             finally
             {

@@ -113,6 +113,137 @@ namespace rhino.compute
             return new ChildLease(url, port);
         }
 
+        // ── BEGIN VEKTORNODE: SELVA — session affinity, see FORK_CHANGES §23 ──
+        // A session is a preference for the child holding its warm GH_Document, not ownership of
+        // it: every miss falls through to an ordinary selection, and a child with claims can still
+        // serve anyone when nothing else is free (nested Hops calls carry no session header).
+        sealed class SessionClaim
+        {
+            public int Port;
+            public int ProcessId;
+            public DateTime LastSeen;
+        }
+
+        /// <summary>
+        /// Lease the child this session last solved on, or claim one for it; with no session, the
+        /// same as <see cref="AcquireChild()"/>. The outcome is logged at Debug and kept on the lease:
+        /// <c>hit</c> (the claimed child), <c>claimed</c> (a first claim, or the claimed child is gone
+        /// or expired), <c>spilled</c> (the claimed child was busy, so the claim moved) or <c>none</c>
+        /// (routed without a claim: routing is off, or a concurrent first request won it).
+        /// </summary>
+        public static ChildLease AcquireChild(string sessionId)
+        {
+            if (sessionId == null)
+                return AcquireChild();
+
+            bool spilled = false;
+            ChildLease pinned = null;
+            lock (lockObject)
+            {
+                PruneExitedChildren();
+                SweepSessionClaims();
+                if (sessionClaims.TryGetValue(sessionId, out var claim))
+                {
+                    activeRequests.TryGetValue(claim.Port, out int active);
+                    // Busy is busy, the session's own earlier request included: a new request never
+                    // waits for, or cancels, one already running. It runs elsewhere, and the claim
+                    // follows it there, as that child gets the newest inputs.
+                    spilled = active > 0;
+                    if (spilled)
+                    {
+                        sessionClaims.Remove(sessionId);
+                    }
+                    else
+                    {
+                        activeRequests[claim.Port] = 1;
+                        claim.LastSeen = DateTime.Now;
+                        pinned = new ChildLease($"http://localhost:{claim.Port}", claim.Port) { Affinity = "hit" };
+                    }
+                }
+            }
+
+            if (pinned != null)
+            {
+                // A hit never reaches SelectChild, which is what refills the pool.
+                EnsurePoolCapacity();
+                LogSessionRouting(sessionId, pinned.Port, "hit");
+                return pinned;
+            }
+
+            var (url, port) = SelectChild(reserve: true);
+
+            bool created = false;
+            lock (lockObject)
+            {
+                int processId = ChildProcessId(port);
+                if (processId != 0 && !sessionClaims.ContainsKey(sessionId) && Config.SessionMaxClaims > 0)
+                {
+                    // A full cap makes room rather than turning the newcomer away: the claim seen
+                    // longest ago belongs to whoever is least likely to come back.
+                    if (sessionClaims.Count >= Config.SessionMaxClaims)
+                        sessionClaims.Remove(sessionClaims.MinBy(c => c.Value.LastSeen).Key);
+                    sessionClaims[sessionId] = new SessionClaim { Port = port, ProcessId = processId, LastSeen = DateTime.Now };
+                    created = true;
+                }
+            }
+            var outcome = !created ? "none" : spilled ? "spilled" : "claimed";
+            LogSessionRouting(sessionId, port, outcome);
+            return new ChildLease(url, port) { Affinity = outcome };
+        }
+
+        static void LogSessionRouting(string sessionId, int port, string outcome)
+            => Log.Debug("Session {Session} routed to compute.geometry on port {Port}: {Affinity}",
+                SessionLogId(sessionId), port, outcome);
+
+        // The id is the client's and may name a user, so the log gets a short hash: enough to tell sessions
+        // apart, where a prefix of a "user:document" id would be the same for every document of one user.
+        static string SessionLogId(string id)
+            => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(id))).Substring(0, 8);
+
+        /// <summary>
+        /// Forget a session's claim after its request timed out or its child failed: the child is
+        /// probably still running the abandoned solve, or unwell, so it also goes to the back of the
+        /// queue, away from the next selection. Only a claim still on <paramref name="port"/> goes: a
+        /// concurrent request may have moved it to a healthy child since.
+        /// </summary>
+        public static void DropSessionClaim(string sessionId, int port)
+        {
+            lock (lockObject)
+            {
+                if (!sessionClaims.TryGetValue(sessionId, out var claim) || claim.Port != port)
+                    return;
+                sessionClaims.Remove(sessionId);
+                computeProcesses = new Queue<Tuple<Process, int>>(
+                    computeProcesses.Where(t => t.Item2 != claim.Port).Concat(computeProcesses.Where(t => t.Item2 == claim.Port)));
+            }
+        }
+
+        // Called under lockObject. A claim only says where a session's warm state is, so a claim
+        // whose child is gone is worth nothing, and an expired one stops steering new sessions away.
+        static void SweepSessionClaims()
+        {
+            var expiry = DateTime.Now - TimeSpan.FromSeconds(Config.SessionTimeout);
+            foreach (var entry in sessionClaims.ToArray())
+            {
+                var claim = entry.Value;
+                if (ChildProcessId(claim.Port) != claim.ProcessId || claim.LastSeen < expiry)
+                    sessionClaims.Remove(entry.Key);
+            }
+        }
+
+        // Called under lockObject. A claim names a child by port and process id: a replacement child
+        // reuses the port, and its document is cold.
+        static int ChildProcessId(int port)
+        {
+            var child = computeProcesses.FirstOrDefault(t => t.Item2 == port);
+            return child == null || child.Item1.HasExited ? 0 : child.Item1.Id;
+        }
+
+        // Called under lockObject.
+        static int SessionClaimsOn(Tuple<Process, int> child)
+            => sessionClaims.Values.Count(c => c.Port == child.Item2 && c.ProcessId == child.Item1.Id);
+        // ── END   VEKTORNODE: SELVA — session affinity ──
+
         public sealed class ChildLease : IDisposable
         {
             bool released;
@@ -125,6 +256,9 @@ namespace rhino.compute
 
             public string BaseUrl { get; }
             public int Port { get; }
+
+            // VEKTORNODE: SELVA — session affinity: how this lease was routed, null without a session.
+            public string Affinity { get; init; }
 
             public void Dispose()
             {
@@ -155,14 +289,17 @@ namespace rhino.compute
         {
             Tuple<Process, int> chosen = null;
             int fewest = int.MaxValue;
+            int fewestClaims = int.MaxValue; // VEKTORNODE: SELVA — session affinity: among equally busy children, the least claimed
             foreach (var child in computeProcesses)
             {
                 activeRequests.TryGetValue(child.Item2, out int count);
-                if (count < fewest)
+                int claims = SessionClaimsOn(child);
+                if (count < fewest || (count == fewest && claims < fewestClaims))
                 {
                     chosen = child;
                     fewest = count;
-                    if (count == 0)
+                    fewestClaims = claims;
+                    if (count == 0 && claims == 0)
                         break;
                 }
             }
@@ -182,8 +319,7 @@ namespace rhino.compute
             lock (lockObject)
             {
                 // Prune any dead processes; the bootstrap launch below starts one if none are left
-                if (computeProcesses.Any(tuple => tuple.Item1.HasExited))
-                    computeProcesses = new Queue<Tuple<Process, int>>(computeProcesses.Where(tuple => !tuple.Item1.HasExited));
+                PruneExitedChildren();
                 activePort = TakeChild(reserve);
             }
 
@@ -211,6 +347,24 @@ namespace rhino.compute
             if (0 == activePort)
                 throw new Exception("No compute server found");
 
+            EnsurePoolCapacity();
+
+            //Log.Information($"Started child process at http://localhost:{activePort} at {DateTime.Now.ToLocalTime()}");
+            return ($"http://localhost:{activePort}", activePort);
+        }
+
+        // Called under lockObject.
+        static void PruneExitedChildren()
+        {
+            if (computeProcesses.Any(tuple => tuple.Item1.HasExited))
+                computeProcesses = new Queue<Tuple<Process, int>>(computeProcesses.Where(tuple => !tuple.Item1.HasExited));
+        }
+
+        // Makes sure the number of children, counting ones still starting, matches SpawnCount, by
+        // starting the missing ones in the background. It never stops one.
+        // VEKTORNODE: SELVA — session affinity: split out of SelectChild, as session hits bypass it.
+        static void EnsurePoolCapacity()
+        {
             // Compute how many background spawns are needed under the lock so we don't
             // schedule redundant tasks based on a stale unsynchronised count.
             int spawnTasksToQueue;
@@ -238,9 +392,6 @@ namespace rhino.compute
                         System.Threading.Tasks.Task.Run(() => LaunchCompute());
                 }
             }
-
-            //Log.Information($"Started child process at http://localhost:{activePort} at {DateTime.Now.ToLocalTime()}");
-            return ($"http://localhost:{activePort}", activePort);
         }
 
         public static void MoveToFrontOfQueue(int port)
@@ -880,6 +1031,8 @@ namespace rhino.compute
         static Queue<Tuple<Process, int>> computeProcesses = new Queue<Tuple<Process, int>>();
         // Requests in progress per child port. Protected by lockObject.
         static readonly Dictionary<int, int> activeRequests = new Dictionary<int, int>();
+        // VEKTORNODE: SELVA — session id -> the child holding its warm state. Protected by lockObject.
+        static readonly Dictionary<string, SessionClaim> sessionClaims = new Dictionary<string, SessionClaim>(StringComparer.Ordinal);
         // Ports for which a child process has been started but has not yet been confirmed
         // ready and added to computeProcesses. Protected by lockObject.
         static readonly HashSet<int> pendingSpawnPorts = new HashSet<int>();

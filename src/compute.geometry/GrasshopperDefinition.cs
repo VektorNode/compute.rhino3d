@@ -686,7 +686,15 @@ namespace compute.geometry
             catch (JsonException) { value = default; return false; }
         }
 
-        public Schema Solve(int rhinoVersion)
+        // VEKTORNODE: SELVA — solve timing, see FORK_CHANGES §25.
+        /// <summary>
+        /// How many active objects the last <see cref="Solve"/> ran, out of <see cref="LastActiveObjects"/>. The rest
+        /// kept the data of the solve before it, so a low count is a warm solve.
+        /// </summary>
+        public int LastRecomputedObjects { get; private set; }
+        public int LastActiveObjects { get; private set; }
+
+        public Schema Solve(int rhinoVersion, CancellationToken cancel = default)
         {
             HasErrors = false;
             Schema outputSchema = new Schema();
@@ -694,7 +702,24 @@ namespace compute.geometry
 
             // solve definition
             Definition.Enabled = true;
-            Definition.NewSolution(false, GH_SolutionMode.CommandLine);
+            // VEKTORNODE: SELVA — solve timing. Expired now means NewSolution runs it. Counted here because
+            // afterwards every object reads Computed, and a ProcessorTime diff misses objects that run in 0 ms.
+            var activeObjects = Definition.ActiveObjects();
+            LastRecomputedObjects = activeObjects.Count(o => o.Phase == GH_SolutionPhase.Blank);
+            LastActiveObjects = activeObjects.Count;
+            // VEKTORNODE: SELVA — cancelling aborts the solution; harvesting is not abortable, so it runs to the end.
+            // RequestAbortSolution is a no-op outside a solution, hence the check before it starts.
+            cancel.ThrowIfCancellationRequested();
+            using (cancel.Register(Definition.RequestAbortSolution))
+                Definition.NewSolution(false, GH_SolutionMode.CommandLine);
+            if (Definition.AbortRequested)
+            {
+                // Also the Selva plugin's own abort. A component stopped mid-run reads as computed: forget the inputs
+                // so the next request sets every one again, which expires everything downstream of them.
+                foreach (var group in input.Values)
+                    group.CacheTree(null);
+                cancel.ThrowIfCancellationRequested();
+            }
 
             foreach (string msg in ErrorMessages)
             {

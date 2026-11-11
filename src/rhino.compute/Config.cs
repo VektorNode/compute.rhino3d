@@ -115,6 +115,26 @@ namespace rhino.compute
         /// </summary>
         public static bool Compression { get; private set; }
 
+        // VEKTORNODE: SELVA — abort on hang-up, see FORK_CHANGES §22.
+        /// <summary>
+        /// RHINO_COMPUTE_ABORT_ON_HANGUP: a caller that hangs up closes its child's request too, so
+        /// the child stops the solve. Off by default; children inherit the variable.
+        /// </summary>
+        public static bool AbortOnHangUp { get; private set; }
+
+        // VEKTORNODE: SELVA — session affinity, see FORK_CHANGES §23.
+        /// <summary>
+        /// RHINO_COMPUTE_SESSION_TIMEOUT: seconds an X-Session-Id claim on a child outlives its last
+        /// request. Default 3600, the default idle span. 0 keeps no claim between requests.
+        /// </summary>
+        public static int SessionTimeout { get; private set; }
+
+        /// <summary>
+        /// RHINO_COMPUTE_SESSION_MAX_CLAIMS: cap on X-Session-Id claims; past it, a new claim replaces
+        /// the one seen longest ago. Default 256. 0 turns session affinity off.
+        /// </summary>
+        public static int SessionMaxClaims { get; private set; }
+
         /// <summary>
         /// Non-fatal configuration problems collected during <see cref="Load"/> —
         /// unparseable values, out-of-range values, deprecated names. Load() runs
@@ -168,6 +188,11 @@ namespace rhino.compute
             }
 
             Compression = GetEnvironmentVariable(RHINO_COMPUTE_COMPRESSION, true);
+            // VEKTORNODE: SELVA — abort on hang-up.
+            AbortOnHangUp = GetEnvironmentVariable(RHINO_COMPUTE_ABORT_ON_HANGUP, false);
+            // VEKTORNODE: SELVA — session affinity.
+            SessionTimeout = GetEnvironmentVariable(RHINO_COMPUTE_SESSION_TIMEOUT, 3600);
+            SessionMaxClaims = GetEnvironmentVariable(RHINO_COMPUTE_SESSION_MAX_CLAIMS, 256);
 
 #if DEBUG
             Debug = true;
@@ -191,6 +216,9 @@ namespace rhino.compute
         const string RHINO_COMPUTE_CHILDCOUNT = "RHINO_COMPUTE_CHILDCOUNT";
         const string RHINO_COMPUTE_IDLESPAN = "RHINO_COMPUTE_IDLESPAN";
         const string RHINO_COMPUTE_COMPRESSION = "RHINO_COMPUTE_COMPRESSION";
+        const string RHINO_COMPUTE_ABORT_ON_HANGUP = "RHINO_COMPUTE_ABORT_ON_HANGUP";
+        const string RHINO_COMPUTE_SESSION_TIMEOUT = "RHINO_COMPUTE_SESSION_TIMEOUT";
+        const string RHINO_COMPUTE_SESSION_MAX_CLAIMS = "RHINO_COMPUTE_SESSION_MAX_CLAIMS";
 
         // Bounds for ChildStartupTimeout. The floor is well below any realistic Rhino
         // load time and exists only to reject 0/negative; the ceiling is an hour, past

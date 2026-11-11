@@ -230,6 +230,10 @@ Two rules carry the safety:
   it. Only an API-key holder can send a solve request, so this is defence in depth against a
   leaked key becoming an SSRF hop.
 
+The solve-result cache (`cachesolve`) keys on the raw body, as upstream, so it never hits a live
+solve: each carries a new solve id and token. Selva's own scheduler cache, keyed on the inputs,
+covers those.
+
 ### 12. Warnings reported outside Debug (SELVA FIX)
 
 **File:** `src/compute.geometry/GrasshopperDefinition.cs` — `LogRuntimeMessages`
@@ -294,6 +298,10 @@ Grasshopper run together with harvesting the outputs. The proxy now forwards the
 (request body), `proxy_wait` (getting a child, a spawn included) and `proxy_child` (the child's
 round trip). The child adds `gh` (`NewSolution`) and `harvest` beside `solve`, which stays their
 sum for clients that read only the three upstream keys; a cache hit answers `cache;desc="hit"`.
+`recomputed;desc="ran/total"` counts the active objects the solve ran: a cached document keeps the
+data of everything an unchanged input feeds, so a low count is a warm solve and `total/total` a
+cold one. It is counted from the expired objects before `NewSolution`, because afterwards every
+object reads as computed.
 `X-Compute-Profile` names the solve's slowest objects by `ProcessorTime` as escaped-ASCII JSON,
 `RHINO_COMPUTE_PROFILE_TOP` of them (default 5, `0` turns it off).
 
@@ -311,6 +319,40 @@ breaks; `\\` and `\n` change meaning. A value that parses as a JSON object or ar
 through unchanged. A JSON string literal still unwraps as before; anything else (an escaped,
 unquoted payload that is not valid JSON) still goes through `Regex.Unescape`.
 Same change as `8.x.selva` #16.
+
+### 18. A solve with Grasshopper errors keeps its child first (SELVA FIX)
+
+**File:** `src/rhino.compute/ReverseProxy.cs` — `ReverseProxyHandler`
+
+`TakeChild` moves the child it picks to the back of the queue, and upstream moves it to the front
+again only on a 200, so a child that fails drops behind the others. A solve that finishes with
+Grasshopper errors also answers 500, so with definitions that raise errors by design every solve
+rotated to another child, whose cached document holds another caller's inputs or none: a cold
+solve each time. A 500 that carries `Server-Timing` came from a finished solve (the exception
+handler's 500 clears it), so that child now stays first as well.
+
+### 19. A caller that hangs up stops its solve, opt-in (SELVA)
+
+**Files:** `src/rhino.compute/ReverseProxy.cs` — `SendProxyRequest`;
+`src/compute.geometry/ResthopperEndpoints.cs` — `GrasshopperSolveHelper`;
+`src/compute.geometry/GrasshopperDefinition.cs` — `Solve`;
+`src/rhino.compute/Config.cs`, `src/compute.geometry/Config.cs` — `AbortOnHangUp`
+
+Behind `RHINO_COMPUTE_ABORT_ON_HANGUP`, off by default, so a stock deployment behaves as upstream: a
+client that times out and retries may rely on the abandoned attempt finishing into the solve cache.
+Forgetting the inputs and not caching after an abort stay on regardless, since the Selva plugin
+aborts solves itself.
+
+Upstream's proxy does not pass a client's disconnect on, so the child finishes every solve its
+caller gave up on, holding the solve lock and the CPU. Selva's latest-wins scheduler abandons the
+in-flight solve whenever a slider moves on, so the solve the user is waiting for ran beside, or
+behind, one nobody wanted. The proxy now forwards the disconnect, and `Solve` takes the request's
+cancellation token and turns it into `RequestAbortSolution`: Grasshopper stops between components
+(a long component stops sooner only if it polls the abort flag itself). After any abort, the
+hang-up's or the Selva plugin's own, `Solve` forgets the inputs it last set, so the next request
+sets every one again, and the result is not cached. A component stopped mid-run reads as computed;
+without this, the same inputs again would return its partial outputs as a valid 200. A plugin abort
+with the caller still connected answers normally, with `selva.outcome.aborted` (#13).
 
 ### 20. A `.ghx` loads on Linux (SELVA FIX)
 
@@ -341,8 +383,6 @@ a request meets first; a child reached directly answers with its own config.
 `/recycle-children`: the ways a plugin is redeployed. Selva drops cached solve results when it
 changes. A plugin swapped on disk while children sit idle-exited is not seen.
 
----
-
 ### 22. Children find the parent under `--urls` (SELVA FIX)
 
 **File:** `src/rhino.compute/Program.cs` — `Main`, `ListenPort`
@@ -351,6 +391,76 @@ Upstream sets `ComputeChildren.ParentPort` only from `--port`. A parent started 
 (`start.sh`: `http://0.0.0.0:6500`) keeps the default 5000, so a child asks a dead `/idlespan`,
 swallows the error and never exits: `--idlespan` had no effect and every idle minute was billed.
 Without `--port`, the parent port now comes from `--urls` or `ASPNETCORE_URLS`.
+
+### 23. Requests with `X-Session-Id` return to their child (SELVA)
+
+**Files:** `src/rhino.compute/ComputeChildren.cs` — `AcquireChild(sessionId)`, `TakeChild`, `EnsurePoolCapacity`;
+`src/rhino.compute/ReverseProxy.cs` — `ReverseProxyHandler`, `SessionIdFrom`, `ForwardTiming`;
+`src/rhino.compute/Config.cs`; `package/environment.example`
+
+Upstream picks a child with no regard for who is asking: the first idle one, which is whichever
+finished last. A child's cached `GH_Document` keeps its last inputs and outputs, so a solve there
+reruns only what changed, but that warmth holds only until two users overlap. They then trade
+children and solve cold. The solve-result cache doesn't help, since a live solve never hits it (§11).
+
+A request with `X-Session-Id` now goes to the child that session last used. The claim is a
+preference, not a taint, because the state is only a cache: a request never fails over a claim, and
+a child with claims can still serve anyone when nothing else is free. Exclusive claims would strand
+new sessions on a full pool and starve nested Hops calls, which carry no session header. Requests
+without the header route as before, and with no claims `TakeChild` chooses exactly as it did.
+
+- A claim names a child by port and process id, as MCP sessions do: a replacement reuses the port.
+- A new claim prefers the least-claimed idle child, and anonymous requests avoid claimed children
+  the same way.
+- A claimed child that is busy, even with the session's own earlier request, sends the request to
+  another child (`spilled`), and the claim moves there, as that child now has the session's newest
+  inputs. A new request never waits for, or cancels, one already running: affinity is for clients
+  that wait for each result before the next change, and it is independent of
+  `RHINO_COMPUTE_ABORT_ON_HANGUP` (§19). A spill can also settle sessions that bunched on the first
+  ready child.
+- A 504 drops the claim and sends the child to the back of the queue, as it may still be running
+  the abandoned solve. So does a 5xx without `Server-Timing`, which is the child failing rather than
+  a solve with Grasshopper errors: kept, the claim would send the session back to it on every
+  request until the claim expired. A `definition_not_cached` 500 is the exception: a healthy child
+  answers it after a spill, and the client's re-upload should go to that child. Either drop removes
+  the claim only if it still names the child that failed, as a concurrent request may have moved it
+  to a healthy one.
+- At the claim cap (`RHINO_COMPUTE_SESSION_MAX_CLAIMS`), a new claim replaces the one seen longest
+  ago. Turning newcomers away instead kept claims of sessions gone for up to the timeout, while
+  active ones routed blind.
+- Session hits bypass `SelectChild`, so `EnsurePoolCapacity` is split out of it for them to refill the pool.
+- Session requests skip `MoveToFrontOfQueue`: at the front, a claimed child would be everyone's
+  first choice.
+- Each routed request reports its outcome as `affinity;desc=hit` (or `claimed`, `spilled`, `none`)
+  in `Server-Timing`, so a client can check routing without the proxy's log. It is also logged at
+  Debug with the port and an 8-character hash of the session id (the id may name a user).
+
+A child that lost its Rhino licence still answers 200, with every output empty and no error, so
+none of this notices it: the claim keeps the session on that child until the process is replaced.
+
+Claims live in the `rhino.compute` process, so several hosts would need load-balancer affinity on
+the same header. Claims keep nothing alive: the idle span still covers the whole pool. They are for
+routing only and isolate nothing, as sessions sharing a child share its process and caches.
+
+### 24. Solve mode as a document constant (SELVA)
+
+**Files:** `src/compute.geometry/IO/Schema.cs` (`Schema.SelvaMode`),
+`src/compute.geometry/ResthopperEndpoints.cs` (`SelvaMode` next to the #11 and #13 constants)
+
+Every upstream solve makes every output, so a definition that exports files pays for the export on
+every edit, though nobody downloads after most of them. A Selva page now solves its edits as
+previews: the request carries `selvamode: "preview"`, compute hands it to the document as the
+`SelvaMode` constant, and the Selva plugin skips the file components that only feed a Download
+button. The download is a second request without the field. Compute never interprets the mode.
+
+- `SelvaMode` is defined on **every** request, `"preview"` or empty, like the #11 constants: a
+  reused document must not keep the previous caller's mode.
+- Only the exact value `preview` passes through, so a caller can't put arbitrary text into a
+  constant every definition can read.
+- `cachesolve` keys on the raw body, so a preview and a full solve of the same inputs never share
+  an entry.
+
+---
 
 ## Non-source divergence
 

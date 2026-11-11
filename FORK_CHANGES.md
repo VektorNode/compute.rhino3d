@@ -379,7 +379,20 @@ or `--timeout`), `maxRequestBytes` (`RHINO_COMPUTE_MAX_REQUEST_SIZE` or `--max-r
 §7). `rhino.compute` answers it itself, because its own timeout and body cap are what
 a request meets first; a child reached directly answers with its own config.
 
-### 22. Requests with `X-Session-Id` return to their child (SELVA)
+`deploymentId` is new on every process start and, in `rhino.compute`, on `/shutdown-children` or
+`/recycle-children`: the ways a plugin is redeployed. Selva drops cached solve results when it
+changes. A plugin swapped on disk while children sit idle-exited is not seen.
+
+### 22. Children find the parent under `--urls` (SELVA FIX)
+
+**File:** `src/rhino.compute/Program.cs` — `Main`, `ListenPort`
+
+Upstream sets `ComputeChildren.ParentPort` only from `--port`. A parent started with `--urls`
+(`start.sh`: `http://0.0.0.0:6500`) keeps the default 5000, so a child asks a dead `/idlespan`,
+swallows the error and never exits: `--idlespan` had no effect and every idle minute was billed.
+Without `--port`, the parent port now comes from `--urls` or `ASPNETCORE_URLS`.
+
+### 23. Requests with `X-Session-Id` return to their child (SELVA)
 
 **Files:** `src/rhino.compute/ComputeChildren.cs` — `AcquireChild(sessionId)`, `TakeChild`, `EnsurePoolCapacity`;
 `src/rhino.compute/ReverseProxy.cs` — `ReverseProxyHandler`, `SessionIdFrom`, `ForwardTiming`;
@@ -429,7 +442,7 @@ Claims live in the `rhino.compute` process, so several hosts would need load-bal
 the same header. Claims keep nothing alive: the idle span still covers the whole pool. They are for
 routing only and isolate nothing, as sessions sharing a child share its process and caches.
 
-### 23. Solve mode as a document constant (SELVA)
+### 24. Solve mode as a document constant (SELVA)
 
 **Files:** `src/compute.geometry/IO/Schema.cs` (`Schema.SelvaMode`),
 `src/compute.geometry/ResthopperEndpoints.cs` (`SelvaMode` next to the #11 and #13 constants)

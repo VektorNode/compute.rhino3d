@@ -148,7 +148,7 @@ namespace rhino.compute
             }
         }
 
-        // ── BEGIN VEKTORNODE: SELVA — session affinity, see FORK_CHANGES §22 ──
+        // ── BEGIN VEKTORNODE: SELVA — session affinity, see FORK_CHANGES §23 ──
         // A session is a preference for the child holding its warm GH_Document, not ownership of
         // it: every miss falls through to an ordinary selection, and a child with claims can still
         // serve anyone when nothing else is free (nested Hops calls carry no session header).

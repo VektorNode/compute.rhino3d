@@ -119,6 +119,17 @@ changed on an already-deployed server without editing web.config.")]
         static System.Diagnostics.Process parentProcess;
         static System.Timers.Timer selfDestructTimer;
 
+        // The port of the first ASP.NET Core listen URL, or -1. Children reach the parent on
+        // localhost, which a wildcard bind (0.0.0.0, *, +) also answers.
+        internal static int ListenPort(string urls)
+        {
+            if (string.IsNullOrWhiteSpace(urls))
+                return -1;
+            string first = urls.Split(';', StringSplitOptions.RemoveEmptyEntries)[0].Trim()
+                .Replace("://*", "://localhost").Replace("://+", "://localhost");
+            return Uri.TryCreate(first, UriKind.Absolute, out var uri) ? uri.Port : -1;
+        }
+
         public static void Main(string[] args)
         {
             Thread.CurrentThread.CurrentCulture = new CultureInfo("en-US");
@@ -172,7 +183,15 @@ changed on an already-deployed server without editing web.config.")]
                 if (parentProcessId > 0)
                     parentProcess = System.Diagnostics.Process.GetProcessById(parentProcessId);
                 port = o.Port;
-                
+                // VEKTORNODE: SELVA FIX — a parent bound with --urls (start.sh) left ParentPort at
+                // 5000, so children polled a dead /idlespan and never exited. See FORK_CHANGES §22.
+                if (port <= 0)
+                {
+                    int listenPort = ListenPort(o.Urls ?? Environment.GetEnvironmentVariable("ASPNETCORE_URLS"));
+                    if (listenPort > 0)
+                        ComputeChildren.ParentPort = listenPort;
+                }
+
             }).WithNotParsed(errors =>
             {
                 if (errors.IsHelp() || errors.IsVersion())

@@ -126,7 +126,7 @@ namespace rhino.compute
         /// </summary>
         public static bool AbortOnHangUp { get; private set; }
 
-        // VEKTORNODE: SELVA — session affinity, see FORK_CHANGES §22.
+        // VEKTORNODE: SELVA — session affinity, see FORK_CHANGES §23.
         /// <summary>
         /// RHINO_COMPUTE_SESSION_TIMEOUT: seconds an X-Session-Id claim on a child outlives its last
         /// request. Default 3600, the default idle span. 0 keeps no claim between requests.

@@ -460,6 +460,15 @@ button. The download is a second request without the field. Compute never interp
 - `cachesolve` keys on the raw body, so a preview and a full solve of the same inputs never share
   an entry.
 
+### 25. `/activechildren` drops children that exited (SELVA FIX)
+
+**Files:** `src/rhino.compute/ComputeChildren.cs` (`CurrentChildCount`)
+
+Upstream counts the tracked pool, and only a request that picks a child prunes the exited ones.
+A child that quits on its idle span stays counted until the next solve, so `/activechildren`,
+the endpoint meant for checking billing without waking Rhino, reported a child that no longer ran.
+The count now prunes first. Pruning spawns nothing, so polling it still costs nothing.
+
 ---
 
 ## Non-source divergence

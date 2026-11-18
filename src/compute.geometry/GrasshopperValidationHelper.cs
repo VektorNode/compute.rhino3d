@@ -135,6 +135,34 @@ namespace compute.geometry
             return gooType.GetMethod("ToComputeJson")?.Invoke(goo, null) as string;
         }
 
+        // The definition's inventory (plugins, components, values, script fingerprints), built by the
+        // Selva plugin's InventoryExtractor for the same reason SchemaToJson delegates: only the
+        // plugin's own Newtonsoft writes its camelCase names. Null when the plugin predates it.
+        public static JObject InventoryJson(GH_Document doc, GH_IO.Serialization.GH_Archive archive)
+        {
+            try
+            {
+                var json = InventoryMethod("ToComputeJson")?.Invoke(null, new object[] { doc, archive }) as string;
+                return json == null ? null : JObject.Parse(json);
+            }
+            catch
+            {
+                // Best-effort: the schema still gates the upload, an inventory only adds to it.
+                return null;
+            }
+        }
+
+        public static JArray ScriptSources(GH_Document doc, string idsCsv)
+        {
+            var json = InventoryMethod("ScriptSourcesJson")?.Invoke(null, new object[] { doc, idsCsv }) as string;
+            return json == null ? null : JArray.Parse(json);
+        }
+
+        static MethodInfo InventoryMethod(string name) => AppDomain.CurrentDomain.GetAssemblies()
+            .Select(a => SafeGetType(a, "Selva.GH.Features.Inventory.InventoryExtractor"))
+            .FirstOrDefault(t => t != null)
+            ?.GetMethod(name, BindingFlags.Public | BindingFlags.Static);
+
         static Type SafeGetType(Assembly assembly, string fullName)
         {
             try { return assembly.GetType(fullName); }

@@ -332,16 +332,47 @@ download is a second request without the field. Compute never interprets the mod
 
 Same as `9.x.state` §24.
 
-### 25. Warm-solve count in `Server-Timing` (SELVA)
-**Files:** `src/compute.geometry/GrasshopperDefinition.cs` — `Solve`, `LastRecomputedObjects`;
-`src/compute.geometry/ResthopperEndpoints.cs` — `GrasshopperSolveHelper`;
-`src/rhino.compute/ReverseProxy.cs` — `ProxyRequest`
+### 25. Solve timing reaches the caller (SELVA)
+**Files:** `src/compute.geometry/GrasshopperDefinition.cs` — `Solve`, `ProfileJson`;
+`src/compute.geometry/ResthopperEndpoints.cs` — `GrasshopperSolveHelper`, `Grasshopper`;
+`src/compute.geometry/Config.cs` — `RHINO_COMPUTE_PROFILE_TOP`;
+`src/rhino.compute/ReverseProxy.cs` — `ForwardTiming`
 
-The child's `Server-Timing` adds `recomputed;desc="ran/total"`, the active objects the solve ran: a
-cached document keeps the data of everything an unchanged input feeds, so a low count is a warm
-solve and `total/total` a cold one. It is counted from the expired objects before `NewSolution`,
-because afterwards every object reads as computed. Upstream's proxy drops the child's
-`Server-Timing`; it now forwards it, with §23's `affinity` entry. Part of `9.x.state` §16.
+Upstream's child sends `Server-Timing: decode, solve, encode`, but the proxy drops it, and `solve`
+lumps the Grasshopper run together with harvesting the outputs. The proxy now forwards the child's
+`Server-Timing` and `X-Compute-Profile`, adds `proxy_init` (startup), `proxy_read` (request body),
+`proxy_wait` (getting a child, a spawn included), `proxy_child` (the child's round trip) and §23's
+`affinity`. The child adds `gh` (`NewSolution`) and `harvest`, whose sum stays `solve`; a cache hit
+answers `cache;desc="hit"`.
+`recomputed;desc="ran/total"` counts the active objects the solve ran: a cached document keeps the
+data of everything an unchanged input feeds, so a low count is a warm solve and `total/total` a cold
+one. It is counted from the expired objects before `NewSolution`, because afterwards every object
+reads as computed.
+`X-Compute-Profile` names the solve's slowest objects by `ProcessorTime` as escaped-ASCII JSON,
+`RHINO_COMPUTE_PROFILE_TOP` of them (default 5, `0` turns it off). Same as `9.x.selva` §16.
+
+### 26. A definition's inventory, and its scripts on request (SELVA)
+**Files:** `src/compute.geometry/FixedEndpoints.cs` (`ExtractSchemaFromArchive`,
+`GetGrasshopperScripts`), `src/compute.geometry/GrasshopperValidationHelper.cs` (`InventoryJson`,
+`ScriptSources`)
+
+Each `grasshopper/schema` result carries `inventory` beside `schemas`: the plugins the file was
+saved with and which this server loaded, its components with their obsolete flag, values set on the
+canvas, script fingerprints and wiring. Selva diffs it between versions. `POST grasshopper/scripts`
+(a `file` and comma-separated `ids`) returns the source of those script components; the inventory
+itself never holds source.
+
+The Selva plugin builds both (`Selva.GH.Features.Inventory.InventoryExtractor`, `ToComputeJson` and
+`ScriptSourcesJson`), called by reflection like `UISchemaGoo.ToComputeJson` in §3. A plugin without
+them leaves `inventory` out and `grasshopper/scripts` answers 422. Same as `9.x.selva` §26.
+
+### 27. `/activechildren` drops children that exited (SELVA FIX)
+**File:** `src/rhino.compute/ComputeChildren.cs` (`CurrentChildCount`)
+
+Upstream counts the tracked pool, and only a request that picks a child prunes the exited ones. A
+child that quits on its idle span stays counted until the next solve, so `/activechildren`, meant
+for checking billing without waking Rhino, reported a child that no longer ran. The count now
+prunes first; pruning spawns nothing. Same as `9.x.selva` §25.
 
 ## Non-source divergence
 

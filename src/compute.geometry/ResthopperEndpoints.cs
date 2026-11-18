@@ -227,9 +227,14 @@ namespace compute.geometry
                 stopwatch.Restart();
                 string returnJson = JsonConvert.SerializeObject(output, GeometryResolver.Settings(input.DataVersion));
                 long encodeTime = stopwatch.ElapsedMilliseconds;
-                // VEKTORNODE: SELVA — solve timing: `recomputed` is ran/total objects, see FORK_CHANGES §25.
-                ctx.Response.Headers["Server-Timing"] = $"decode;dur={decodeTime}, solve;dur={solveTime}, encode;dur={encodeTime}, " +
-                    $"recomputed;desc=\"{definition.LastRecomputedObjects}/{definition.LastActiveObjects}\"";
+                // VEKTORNODE: SELVA — solve timing, see FORK_CHANGES §25: `solve` stays the sum for clients that
+                // read only decode/solve/encode; `gh` and `harvest` split it. `recomputed` is ran/total objects.
+                long ghTime = definition.LastGhMilliseconds;
+                ctx.Response.Headers.Append("Server-Timing",
+                    $"decode;dur={decodeTime}, solve;dur={solveTime}, gh;dur={ghTime}, harvest;dur={solveTime - ghTime}, encode;dur={encodeTime}, " +
+                    $"recomputed;desc=\"{definition.LastRecomputedObjects}/{definition.LastActiveObjects}\"");
+                if (Config.ProfileTop > 0)
+                    ctx.Response.Headers.Append("X-Compute-Profile", definition.ProfileJson(Config.ProfileTop));
                 if (definition.HasErrors)
                     ctx.Response.StatusCode = 500; // internal server error
                 else
@@ -283,6 +288,8 @@ namespace compute.geometry
                 if (!string.IsNullOrWhiteSpace(cachedReturnJson))
                 {
                     ctx.Response.ContentType = "application/json";
+                    // VEKTORNODE: SELVA — solve timing, see FORK_CHANGES §25: a hit runs nothing, and says so.
+                    ctx.Response.Headers.Append("Server-Timing", "cache;desc=\"hit\"");
                     await ctx.Response.WriteAsync(cachedReturnJson);
                     return;
                 }

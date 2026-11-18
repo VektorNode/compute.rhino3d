@@ -686,13 +686,37 @@ namespace compute.geometry
             catch (JsonException) { value = default; return false; }
         }
 
-        // VEKTORNODE: SELVA — solve timing, see FORK_CHANGES §25.
+        // ── BEGIN VEKTORNODE: SELVA — solve timing, see FORK_CHANGES §25 ──
+        /// <summary>The last <see cref="Solve"/>'s <c>NewSolution</c> alone, without harvesting the outputs.</summary>
+        public long LastGhMilliseconds { get; private set; }
+
         /// <summary>
         /// How many active objects the last <see cref="Solve"/> ran, out of <see cref="LastActiveObjects"/>. The rest
         /// kept the data of the solve before it, so a low count is a warm solve.
         /// </summary>
         public int LastRecomputedObjects { get; private set; }
         public int LastActiveObjects { get; private set; }
+
+        // Each object's ProcessorTime before the last solve: an object the solve did not expire
+        // keeps the time of the run that last computed it, so only a changed time is this solve's.
+        Dictionary<Guid, TimeSpan> processorTimeBefore = new Dictionary<Guid, TimeSpan>();
+
+        /// <summary>
+        /// The <paramref name="top"/> slowest objects the last solve computed, as JSON for the
+        /// <c>X-Compute-Profile</c> header. Non-ASCII is escaped: a header value must be ASCII.
+        /// </summary>
+        public string ProfileJson(int top)
+        {
+            var slowest = Definition.ActiveObjects()
+                .OfType<GH_ActiveObject>()
+                .Where(o => !processorTimeBefore.TryGetValue(o.InstanceGuid, out var before) || before != o.ProcessorTime)
+                .Select(o => new { name = o.Name, nick = o.NickName, ms = (long)o.ProcessorTime.TotalMilliseconds })
+                .Where(o => o.ms > 0)
+                .OrderByDescending(o => o.ms)
+                .Take(top);
+            return JsonConvert.SerializeObject(slowest, new JsonSerializerSettings { StringEscapeHandling = StringEscapeHandling.EscapeNonAscii });
+        }
+        // ── END   VEKTORNODE: SELVA — solve timing ──
 
         public Schema Solve(int rhinoVersion, CancellationToken cancel = default)
         {
@@ -705,13 +729,18 @@ namespace compute.geometry
             // VEKTORNODE: SELVA — solve timing. Expired now means NewSolution runs it. Counted here because
             // afterwards every object reads Computed, and a ProcessorTime diff misses objects that run in 0 ms.
             var activeObjects = Definition.ActiveObjects();
+            processorTimeBefore = activeObjects
+                .OfType<GH_ActiveObject>()
+                .ToDictionary(o => o.InstanceGuid, o => o.ProcessorTime);
             LastRecomputedObjects = activeObjects.Count(o => o.Phase == GH_SolutionPhase.Blank);
             LastActiveObjects = activeObjects.Count;
+            var ghStopwatch = System.Diagnostics.Stopwatch.StartNew();
             // VEKTORNODE: SELVA — cancelling aborts the solution; harvesting is not abortable, so it runs to the end.
             // RequestAbortSolution is a no-op outside a solution, hence the check before it starts.
             cancel.ThrowIfCancellationRequested();
             using (cancel.Register(Definition.RequestAbortSolution))
                 Definition.NewSolution(false, GH_SolutionMode.CommandLine);
+            LastGhMilliseconds = ghStopwatch.ElapsedMilliseconds;
             if (Definition.AbortRequested)
             {
                 // Also the Selva plugin's own abort. A component stopped mid-run reads as computed: forget the inputs

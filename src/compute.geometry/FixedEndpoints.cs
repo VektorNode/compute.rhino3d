@@ -29,6 +29,7 @@ namespace compute.geometry
             app.MapGet("grasshopper/schema", GetGrasshopperSchemaInfo);
             app.MapPost("grasshopper/schema", GetGrasshopperSchemaFromFiles);
             app.MapPost("grasshopper/schema/url", GetGrasshopperSchemaFromUrl);
+            app.MapPost("grasshopper/scripts", GetGrasshopperScripts); // VEKTORNODE: SELVA — see FORK_CHANGES §26
             app.MapPost("cache/purge", PurgeCache);
             app.MapPost("shutdown", ShutdownChild);
         }
@@ -285,7 +286,46 @@ namespace compute.geometry
                 schemas.Add(schemaJson);
             }
 
-            return GrasshopperValidationHelper.SuccessResult(fileName, schemas);
+            var result = GrasshopperValidationHelper.SuccessResult(fileName, schemas);
+            // VEKTORNODE: SELVA — FORK_CHANGES §26. Absent with a plugin that predates it.
+            var inventory = GrasshopperValidationHelper.InventoryJson(doc, archive);
+            if (inventory != null)
+                result["inventory"] = inventory;
+            return result;
+        }
+
+        // VEKTORNODE: SELVA — FORK_CHANGES §26. Multipart: one .gh or .ghx as `file`, and `ids`, the
+        // comma-separated InstanceGuids of the script components to read. Returns their source.
+        static async Task GetGrasshopperScripts(HttpContext ctx)
+        {
+            var form = await ctx.Request.ReadFormAsync();
+            var file = form.Files.FirstOrDefault();
+            ctx.Response.ContentType = "application/json";
+            if (file == null)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsync(Newtonsoft.Json.JsonConvert.SerializeObject(new { error = "No file provided." }));
+                return;
+            }
+
+            using var mem = new MemoryStream();
+            await file.OpenReadStream().CopyToAsync(mem);
+            var archive = GrasshopperDefinition.ArchiveFromBytes(mem.ToArray());
+            var doc = archive == null ? null : GrasshopperValidationHelper.DocumentFromArchive(archive);
+            var scripts = doc == null ? null : GrasshopperValidationHelper.ScriptSources(doc, form["ids"].ToString());
+            if (scripts == null)
+            {
+                ctx.Response.StatusCode = 422;
+                await ctx.Response.WriteAsync(Newtonsoft.Json.JsonConvert.SerializeObject(new
+                {
+                    error = doc == null
+                        ? "Failed to load the Grasshopper document."
+                        : "The installed Selva plugin cannot read scripts. Update Selva.gha on this server."
+                }));
+                return;
+            }
+
+            await ctx.Response.WriteAsync(scripts.ToString(Newtonsoft.Json.Formatting.None));
         }
         // ── END   VEKTORNODE: SELVA — schema-extraction endpoints ──
     }

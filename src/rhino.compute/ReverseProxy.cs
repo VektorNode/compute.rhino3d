@@ -382,9 +382,32 @@ namespace rhino.compute
         }
         // ── END   VEKTORNODE: SELVA — session affinity ──
 
+        // ── BEGIN VEKTORNODE: SELVA — solve timing, see FORK_CHANGES §25 ──
+        // The child's own timing and profile reach the caller, beside the proxy's: `init` waits for
+        // startup, `read` takes in the request body, `wait` gets a child (a spawn when none runs),
+        // `child` is the child's round trip, body included.
+        static readonly string[] ForwardedTimingHeaders = { "Server-Timing", "X-Compute-Profile" };
+
+        static void ForwardTiming(HttpResponseMessage from, HttpResponse to, long initMs, long readMs, long waitMs, long childMs,
+            string affinity)
+        {
+            foreach (var name in ForwardedTimingHeaders)
+                if (from.Headers.TryGetValues(name, out var values))
+                    foreach (var value in values)
+                        to.Headers.Append(name, value);
+            to.Headers.Append("Server-Timing",
+                $"proxy_init;dur={initMs}, proxy_read;dur={readMs}, proxy_wait;dur={waitMs}, proxy_child;dur={childMs}");
+            // Session affinity (§23): the routing outcome, so a client can check it without the Debug log.
+            if (affinity != null)
+                to.Headers.Append("Server-Timing", $"affinity;desc={affinity}");
+        }
+        // ── END   VEKTORNODE: SELVA — solve timing ──
+
         static async Task ProxyRequest(HttpRequest req, HttpResponse res, HttpMethod method)
         {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew(); // VEKTORNODE: SELVA — solve timing
             await AwaitInitTask();
+            long initMs = stopwatch.ElapsedMilliseconds;
             string sessionId = SessionIdFrom(req); // VEKTORNODE: SELVA — session affinity
             using (var tracker = new ConcurrentRequestTracker())
             {
@@ -398,6 +421,7 @@ namespace rhino.compute
                     await req.Body.CopyToAsync(buffer);
                     body = buffer.ToArray();
                 }
+                long readMs = stopwatch.ElapsedMilliseconds - initMs; // VEKTORNODE: SELVA — solve timing
 
                 // A child can idle-exit, or lose its listener, just as a request picks it. Only a refused
                 // connection is retried: nothing reached the child, so no solve is duplicated.
@@ -405,10 +429,12 @@ namespace rhino.compute
                 for (int attempt = 0; ; attempt++)
                 {
                     string responseString;
+                    long acquireStart = stopwatch.ElapsedMilliseconds; // VEKTORNODE: SELVA — solve timing
                     // VEKTORNODE: SELVA — session affinity. After an eviction below, the claim's child is
                     // gone, so the retry claims another, and each attempt logs its own outcome.
                     using (var child = ComputeChildren.AcquireChild(sessionId))
                     {
+                        long childStart = stopwatch.ElapsedMilliseconds; // VEKTORNODE: SELVA — solve timing
                         HttpResponseMessage proxyResponse;
                         try
                         {
@@ -456,13 +482,9 @@ namespace rhino.compute
                                 res.ContentType = proxyResponse.Content.Headers.ContentType.ToString();
                             responseString = await proxyResponse.Content.ReadAsStringAsync();
 
-                            // VEKTORNODE: SELVA — solve timing and routing, see §25: the child's Server-Timing
-                            // (warm-solve count included) and the session routing outcome reach the caller.
-                            if (proxyResponse.Headers.TryGetValues("Server-Timing", out var timing))
-                                foreach (var value in timing)
-                                    res.Headers.Append("Server-Timing", value);
-                            if (child.Affinity != null)
-                                res.Headers.Append("Server-Timing", $"affinity;desc={child.Affinity}");
+                            // VEKTORNODE: SELVA — solve timing and routing, see §25.
+                            ForwardTiming(proxyResponse, res, initMs, readMs,
+                                childStart - acquireStart, stopwatch.ElapsedMilliseconds - childStart, child.Affinity);
 
                             // VEKTORNODE: SELVA — session affinity: a 5xx without Server-Timing is the child
                             // failing, not a solve with Grasshopper errors. Left in place, the claim would send

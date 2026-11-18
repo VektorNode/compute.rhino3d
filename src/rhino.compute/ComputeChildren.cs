@@ -1017,13 +1017,19 @@ namespace rhino.compute
             return port;
         }
 
-        /// <summary>Returns the current count of tracked compute.geometry children.</summary>
+        /// <summary>Returns the current count of live compute.geometry children.</summary>
         public static int CurrentChildCount
         {
             get
             {
+                // VEKTORNODE: SELVA — a child that exits on its idle span leaves the pool only when
+                // the next request prunes it, so /activechildren kept counting a child that no longer
+                // bills. Pruning here spawns nothing.
                 lock (lockObject)
+                {
+                    PruneExitedChildren();
                     return computeProcesses.Count;
+                }
             }
         }
 

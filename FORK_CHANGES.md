@@ -469,6 +469,22 @@ A child that quits on its idle span stays counted until the next solve, so `/act
 the endpoint meant for checking billing without waking Rhino, reported a child that no longer ran.
 The count now prunes first. Pruning spawns nothing, so polling it still costs nothing.
 
+### 26. A definition's inventory, and its scripts on request (SELVA)
+
+**Files:** `src/compute.geometry/FixedEndpoints.cs` (`ExtractSchemaFromArchive`,
+`GetGrasshopperScripts`), `src/compute.geometry/GrasshopperValidationHelper.cs` (`InventoryJson`,
+`ScriptSources`)
+
+Each `grasshopper/schema` result carries `inventory` beside `schemas`: the plugins the file was
+saved with and which this server loaded, its components with their obsolete flag, values set on the
+canvas, script fingerprints and wiring. Selva diffs it between versions. `POST grasshopper/scripts`
+(a `file` and comma-separated `ids`) returns the source of those script components, for a code
+diff on request; the inventory itself never holds source.
+
+The Selva plugin builds both (`Selva.GH.Features.Inventory.InventoryExtractor`, `ToComputeJson` and
+`ScriptSourcesJson`), called by reflection like `UISchemaGoo.ToComputeJson` in §1. A plugin without
+them leaves `inventory` out and `grasshopper/scripts` answers 422.
+
 ---
 
 ## Non-source divergence

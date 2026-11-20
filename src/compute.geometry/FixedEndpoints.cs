@@ -138,12 +138,29 @@ namespace compute.geometry
                 if (asm != null && !string.IsNullOrEmpty(asm.Name) && !asm.IsCoreLibrary && !ghPluginInfo.ContainsKey(asm.Name))
                 {
                     var version = (string.IsNullOrEmpty(asm.Version)) ? asm.Assembly.GetName().Version.ToString() : asm.Version;
+                    // VEKTORNODE: SELVA — the Yak package version when Yak installed it, see FORK_CHANGES §27.
+                    version = YakPackageVersion(asm.Location) ?? version;
                     ghPluginInfo.Add(asm.Name, version);
                 }
             }
             ctx.Response.ContentType = "application/json";
             await ctx.Response.WriteAsJsonAsync(ghPluginInfo);
         }
+
+        // ── BEGIN VEKTORNODE: SELVA — Yak package version, see FORK_CHANGES §27 ──
+        // Yak installs to `packages/<rhino>/<package>/<version>/`, sometimes with the .gha in a
+        // subfolder below that. Null for a plugin Yak didn't install.
+        static string YakPackageVersion(string location)
+        {
+            if (string.IsNullOrEmpty(location)) return null;
+            for (var dir = new DirectoryInfo(Path.GetDirectoryName(location)); dir != null; dir = dir.Parent)
+            {
+                if (string.Equals(dir.Parent?.Parent?.Parent?.Name, "packages", StringComparison.OrdinalIgnoreCase))
+                    return dir.Name;
+            }
+            return null;
+        }
+        // ── END VEKTORNODE: SELVA ──
 
         // ── BEGIN VEKTORNODE: SELVA — schema-extraction endpoints ──
         static async Task GetGrasshopperSchemaInfo(HttpContext ctx)

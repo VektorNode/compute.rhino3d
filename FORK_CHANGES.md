@@ -485,6 +485,17 @@ The Selva plugin builds both (`Selva.GH.Features.Inventory.InventoryExtractor`, 
 `ScriptSourcesJson`), called by reflection like `UISchemaGoo.ToComputeJson` in §1. A plugin without
 them leaves `inventory` out and `grasshopper/scripts` answers 422.
 
+### 27. Installed plugins report their Yak version (SELVA)
+
+**File:** `src/compute.geometry/FixedEndpoints.cs` — `GetInstalledPluginsGrasshopper`, `YakPackageVersion`
+
+Upstream reports the version a plugin's `GH_AssemblyInfo` gives, usually its numeric assembly
+version. That can't carry a prerelease tag and often isn't the package version at all: a server
+with SheepMetal `2.2.0-beta.1` and WombatGH `1.3.0` reported `2.2.0.0` and `1.1.0.0`. For a plugin
+Yak installed, the version is now the name of its package folder
+(`packages/<rhino>/<package>/<version>/`), the one an operator pinned. Other plugins keep the
+assembly's own version. The response shape doesn't change.
+
 ---
 
 ## Non-source divergence

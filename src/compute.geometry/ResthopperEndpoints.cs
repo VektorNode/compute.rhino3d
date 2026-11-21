@@ -36,9 +36,9 @@ namespace compute.geometry
     {
         public static void MapEndpoints(IEndpointRouteBuilder app)
         {
-            app.MapPost("/grasshopper", Grasshopper);
-            app.MapPost("/io", PostIoNames);
-            app.MapGet("/io", GetIoNames);
+            app.MapPost("/grasshopper", Grasshopper).Billable();
+            app.MapPost("/io", PostIoNames).Billable();
+            app.MapGet("/io", GetIoNames).Billable();
         }
 
         static GrasshopperDefinition FromAlgo(string algo)
@@ -162,6 +162,7 @@ namespace compute.geometry
                 }
                 throw new BadRequestException("Unable to load grasshopper definition");
             }
+            RequestDefinitions.Set(ctx, definition, input.FileName, cached: false);
             SetDefaultTolerances(input.AbsoluteTolerance, input.AngleTolerance);
             SetDefaultUnits(input.ModelUnits);
 
@@ -227,6 +228,7 @@ namespace compute.geometry
                 Serilog.Log.Debug($"Solving definition{fileNameMsg}...");
                 // VEKTORNODE: SELVA — a hang-up aborts the solve; a finished solve still gets encoded and cached.
                 var output = definition.Solve(input.DataVersion, input.DataFormat, hangUp);
+                RequestOutcome.Reported(ctx, output.Errors, output.Warnings);
                 output.Pointer = definition.CacheKey;
                 long solveTime = stopwatch.ElapsedMilliseconds;
                 stopwatch.Restart();
@@ -289,9 +291,10 @@ namespace compute.geometry
             if (input.CacheSolve)
             {
                 // look in the cache to see if this has already been solved
-                string cachedReturnJson = DataCache.GetCachedSolveResults(body);
+                string cachedReturnJson = DataCache.GetCachedSolveResults(body, out var cachedDefinition);
                 if (!string.IsNullOrWhiteSpace(cachedReturnJson))
                 {
+                    RequestDefinitions.Set(ctx, cachedDefinition, input.FileName, cached: true);
                     ctx.Response.ContentType = "application/json";
                     // VEKTORNODE: SELVA — solve timing: a hit runs nothing, and says so.
                     ctx.Response.Headers.Append("Server-Timing", "cache;desc=\"hit\"");
@@ -316,7 +319,7 @@ namespace compute.geometry
                 // We can narrow down this lock over time. As it stands, launching many
                 // compute instances on one computer is going to be a better solution anyway
                 // to deal with solving many times simultaniously.
-                lock (ghSolveLock)
+                using (CpuLedger.Lock(ghSolveLock))
                 {
                     json = GrasshopperSolveHelper(input, body, stopwatch, ctx);
                 }
@@ -401,7 +404,8 @@ namespace compute.geometry
             }
             if (definition == null)
                 throw new BadRequestException("Unable to load grasshopper definition");
-                
+            RequestDefinitions.Set(ctx, definition, fileName, cached: null);
+
             var responseSchema = definition.GetInputsAndOutputs();
 
             var inputSuffix = String.Empty;
@@ -427,6 +431,7 @@ namespace compute.geometry
             {
                 responseSchema.Errors.Add(error);
             }
+            RequestOutcome.Reported(ctx, responseSchema.Errors, responseSchema.Warnings);
             string jsonResponse = JsonConvert.SerializeObject(responseSchema);
 
             ctx.Response.ContentType = "application/json";

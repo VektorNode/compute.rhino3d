@@ -2,6 +2,8 @@
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
+using Compute.Http;
+using compute.geometry;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -16,6 +18,15 @@ namespace rhino.compute
         static Task initTask;
         static HttpClient client;
         private const string API_KEY_HEADER = "RhinoComputeKey";
+        public const string METADATA_HEADER = "Rhino-Compute-Metadata";
+        // HttpContext.Items keys for the client's request encoding and its CountingReadStream, set before compression unpacks it.
+        public static readonly object REQUEST_ENCODING = new object();
+        public static readonly object REQUEST_RECEIVED = new object();
+
+        // On once a child's /healthcheck says its usage log is on, which it is while Rhino's usage meter meters it: the
+        // children then write usage records. Until then nothing here takes part in usage logging.
+        public static volatile bool UsageLog;
+
         static void Initialize()
         {
             // Use an atomic compare-and-swap so that concurrent first requests cannot
@@ -181,7 +192,7 @@ namespace rhino.compute
                 await res.WriteAsJsonAsync(new { error = parseError });
                 return;
             }
-            var (shutdown, _) = ComputeChildren.ShutdownChildren(portFilter, respawn: false);
+            var (shutdown, _) = ComputeChildren.ShutdownChildren("shutdown-children", portFilter, respawn: false);
             if (shutdown.Length > 0) RotateDeploymentId();
             await res.WriteAsJsonAsync(new
             {
@@ -201,7 +212,7 @@ namespace rhino.compute
                 await res.WriteAsJsonAsync(new { error = parseError });
                 return;
             }
-            var (shutdown, spawned) = ComputeChildren.ShutdownChildren(portFilter, respawn: true);
+            var (shutdown, spawned) = ComputeChildren.ShutdownChildren("recycle-children", portFilter, respawn: true);
             if (shutdown.Length > 0) RotateDeploymentId();
             await res.WriteAsJsonAsync(new
             {
@@ -335,7 +346,7 @@ namespace rhino.compute
             }
         }
 
-        static async Task<HttpResponseMessage> SendProxyRequest(HttpRequest initialRequest, HttpMethod method, string baseurl, System.IO.MemoryStream body) // VEKTORNODE: SELVA FIX — body read by the caller, §8
+        static async Task<HttpResponseMessage> SendProxyRequest(HttpRequest initialRequest, HttpMethod method, string baseurl, System.IO.MemoryStream body, string metadata) // VEKTORNODE: SELVA FIX — body read by the caller, §8
         {
             string proxyUrl = $"{baseurl}{initialRequest.Path}{initialRequest.QueryString}";
 
@@ -348,11 +359,9 @@ namespace rhino.compute
 
             if (method == HttpMethod.Post)
             {
-                // include RhinoComputeKey header in request to compute child process
                 using var req = new HttpRequestMessage(HttpMethod.Post, proxyUrl);
-                if (initialRequest.Headers.TryGetValue(API_KEY_HEADER, out var keyHeader))
-                    req.Headers.Add(API_KEY_HEADER, keyHeader.ToString());
 
+                CopyRequestHeaders(initialRequest, req, metadata);
                 var content = new ByteArrayContent(body.GetBuffer(), 0, (int)body.Length);
                 if (!string.IsNullOrWhiteSpace(initialRequest.ContentType) &&
                     System.Net.Http.Headers.MediaTypeHeaderValue.TryParse(initialRequest.ContentType, out var parsedContentType))
@@ -365,10 +374,79 @@ namespace rhino.compute
 
             if (method == HttpMethod.Get)
             {
-                return await client.GetAsync(proxyUrl, hangUp);
+                using var req = new HttpRequestMessage(HttpMethod.Get, proxyUrl);
+                CopyRequestHeaders(initialRequest, req, metadata);
+                return await client.SendAsync(req, hangUp);
             }
 
             throw new System.NotSupportedException("Only GET and POST are currently supported for reverse proxy");
+        }
+
+        static void CopyRequestHeaders(HttpRequest from, HttpRequestMessage to, string metadata)
+        {
+            if (from.Headers.TryGetValue(API_KEY_HEADER, out var key))
+                to.Headers.TryAddWithoutValidation(API_KEY_HEADER, key.ToString());
+            AddUsageHeaders(from, to, metadata);
+        }
+
+        // While the usage log is on, what a child needs for a request's usage record: its metadata, and the client's
+        // side of it. From is null for a call rhino.compute makes itself.
+        internal static void AddUsageHeaders(HttpRequest from, HttpRequestMessage to, string metadata)
+        {
+            if (!string.IsNullOrEmpty(metadata))
+                to.Headers.TryAddWithoutValidation(METADATA_HEADER, metadata);
+            if (!UsageLog)
+                return;
+            // The child packs the answer, so the size it records is the size sent; the answer is passed on as is.
+            if (from != null && Config.Compression && CompressionMiddleware.AcceptsGzip(from.Headers.AcceptEncoding))
+                to.Headers.TryAddWithoutValidation("Accept-Encoding", "gzip");
+            string encoding = from?.HttpContext.Items[REQUEST_ENCODING] as string ?? "none";
+            long bytes = (from?.HttpContext.Items[REQUEST_RECEIVED] as CountingReadStream)?.BytesRead ?? 0;
+            to.Headers.TryAddWithoutValidation(HttpCompression.CLIENT_REQUEST_HEADER, $"encoding={encoding}; bytes={bytes}");
+        }
+
+        // The Rhino-Compute-Metadata a request's usage record gets: a nested call carries that of the request it was made
+        // for, which its child names in LocalConnections.CALLER_HEADER, else that of the request its child is serving,
+        // whatever Rhino-Compute-Metadata it has. Which child opened a connection can't change, so it's looked up once
+        // per connection, and only while the usage log is on.
+        internal static string Metadata(HttpRequest req)
+        {
+            if (!UsageLog)
+                return null;
+            var connection = req.HttpContext.Connection;
+            var items = req.HttpContext.Features.Get<Microsoft.AspNetCore.Connections.Features.IConnectionItemsFeature>()?.Items;
+            int port;
+            if (items != null && items.TryGetValue(NESTED_CALL_PORT, out object cached))
+                port = (int)cached;
+            else
+            {
+                port = ComputeChildren.NestedCallPort(connection.RemoteIpAddress, connection.RemotePort, connection.LocalPort);
+                if (items != null)
+                    items[NESTED_CALL_PORT] = port;
+            }
+            if (port == 0)
+                return EscapedJson(req.Headers[METADATA_HEADER].ToString());
+            string caller = req.Headers[LocalConnections.CALLER_HEADER].ToString();
+            return caller.Length > 0 ? caller : ComputeChildren.MetadataServedBy(port);
+        }
+
+        static readonly object NESTED_CALL_PORT = new object();
+
+        // Headers sent to a child must be ASCII, so metadata goes on as JSON with anything else escaped. What isn't JSON
+        // is left out, as the child would leave it out of the record.
+        static string EscapedJson(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return null;
+            try
+            {
+                using var json = System.Text.Json.JsonDocument.Parse(value);
+                return System.Text.Json.JsonSerializer.Serialize(json.RootElement);
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return null;
+            }
         }
 
         // GET and POST routes both delegate to the shared handler; the /grasshopper route
@@ -421,6 +499,19 @@ namespace rhino.compute
         }
         // ── END   VEKTORNODE: SELVA — session affinity ──
 
+        // VEKTORNODE: SELVA — session affinity and the error log read a failed answer as text; with the usage log on
+        // it arrives as bytes, gzipped when the client takes gzip.
+        static string BodyText(byte[] bytes, System.Collections.Generic.ICollection<string> encodings)
+        {
+            if (encodings.Count == 0)
+                return System.Text.Encoding.UTF8.GetString(bytes);
+            if (encodings.Count != 1 || !string.Equals(encodings.First(), "gzip", StringComparison.OrdinalIgnoreCase))
+                return null;
+            using var unpacked = new System.IO.Compression.GZipStream(new System.IO.MemoryStream(bytes), System.IO.Compression.CompressionMode.Decompress);
+            using var reader = new System.IO.StreamReader(unpacked, System.Text.Encoding.UTF8);
+            return reader.ReadToEnd();
+        }
+
         // Shared proxy handler: forwards the request to a compute.geometry child, propagates
         // the response status code, and promotes the responding child to the front of the queue
         // on success so it is preferred for the next round-robin selection.
@@ -429,13 +520,15 @@ namespace rhino.compute
             var stopwatch = System.Diagnostics.Stopwatch.StartNew(); // VEKTORNODE: SELVA — solve timing
             await AwaitInitTask();
             long initMs = stopwatch.ElapsedMilliseconds;
-            string responseString;
+            string responseString = null;
+            byte[] responseBytes = null;
             string sessionId = SessionIdFrom(req); // VEKTORNODE: SELVA — session affinity
             int childPort = 0; // VEKTORNODE: SELVA — session affinity: the timeout below drops only this child's claim
             try
             {
                 using (new ConcurrentRequestTracker())
                 {
+                    string metadata = Metadata(req);
                     // Read in full first, so the timeout covers the child's work and not the client's upload.
                     // VEKTORNODE: SELVA FIX — read here, not in SendProxyRequest, so a retry re-sends it (§8).
                     System.IO.MemoryStream body = null;
@@ -456,14 +549,14 @@ namespace rhino.compute
                         long acquireStart = stopwatch.ElapsedMilliseconds;
                         // VEKTORNODE: SELVA — session affinity. After an eviction below, the claim's child is
                         // gone, so the retry claims another, and each attempt logs its own outcome.
-                        using (var child = ComputeChildren.AcquireChild(sessionId))
+                        using (var child = UsageLog ? ComputeChildren.AcquireChild(sessionId, metadata, req.Path) : ComputeChildren.AcquireChild(sessionId))
                         {
                             childPort = child.Port;
                             long childStart = stopwatch.ElapsedMilliseconds;
                             HttpResponseMessage proxyResponse;
                             try
                             {
-                                proxyResponse = await SendProxyRequest(req, method, child.BaseUrl, body);
+                                proxyResponse = await SendProxyRequest(req, method, child.BaseUrl, body, metadata);
                             }
                             catch (HttpRequestException ex) when (ex.HttpRequestError == HttpRequestError.ConnectionError
                                                                   && attempt < maxAttempts - 1)
@@ -491,7 +584,18 @@ namespace rhino.compute
                                 // as application/json rather than the ASP.NET Core default text/plain.
                                 if (proxyResponse.Content.Headers.ContentType != null)
                                     res.ContentType = proxyResponse.Content.Headers.ContentType.ToString();
-                                responseString = await proxyResponse.Content.ReadAsStringAsync();
+                                if (!UsageLog)
+                                    responseString = await proxyResponse.Content.ReadAsStringAsync();
+                                else
+                                {
+                                    // Packed by the child when the client takes gzip; compression leaves an encoded answer as it is.
+                                    if (proxyResponse.Content.Headers.ContentEncoding.Count > 0)
+                                        res.Headers.ContentEncoding = string.Join(", ", proxyResponse.Content.Headers.ContentEncoding);
+                                    responseBytes = await proxyResponse.Content.ReadAsByteArrayAsync();
+                                    // VEKTORNODE: SELVA — the checks below read an error's body as text, packed or not.
+                                    if (!proxyResponse.IsSuccessStatusCode)
+                                        responseString = BodyText(responseBytes, proxyResponse.Content.Headers.ContentEncoding);
+                                }
                                 ForwardTiming(proxyResponse, res, initMs, readMs,
                                     childStart - acquireStart, stopwatch.ElapsedMilliseconds - childStart, child.Affinity);
 
@@ -502,7 +606,7 @@ namespace rhino.compute
                                 // and the client's re-upload should land on that same child.
                                 if (sessionId != null && (int)proxyResponse.StatusCode >= 500
                                     && !proxyResponse.Headers.Contains("Server-Timing")
-                                    && !responseString.Contains("\"definition_not_cached\""))
+                                    && !(responseString ?? string.Empty).Contains("\"definition_not_cached\""))
                                     ComputeChildren.DropSessionClaim(sessionId, child.Port);
 
                                 // VEKTORNODE: SELVA FIX — the child's error body went to the caller only, so a
@@ -522,9 +626,18 @@ namespace rhino.compute
                 }
                 // The child is free once its response is read; a slow client shouldn't hold it.
                 // VEKTORNODE: SELVA FIX — a length, not chunked: Node's client hangs on a chunked 500. See FORK_CHANGES §14.
-                if (!string.IsNullOrEmpty(responseString)) // a 204/304 must not declare a length
-                    res.ContentLength = System.Text.Encoding.UTF8.GetByteCount(responseString);
-                await res.WriteAsync(responseString);
+                if (responseBytes != null)
+                {
+                    if (responseBytes.Length > 0) // a 204/304 must not declare a length
+                        res.ContentLength = responseBytes.Length;
+                    await res.Body.WriteAsync(responseBytes, req.HttpContext.RequestAborted);
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(responseString)) // a 204/304 must not declare a length
+                        res.ContentLength = System.Text.Encoding.UTF8.GetByteCount(responseString);
+                    await res.WriteAsync(responseString);
+                }
             }
             catch (Exception ex) when (ex is Microsoft.AspNetCore.Connections.ConnectionResetException ||
                                        ex is OperationCanceledException)

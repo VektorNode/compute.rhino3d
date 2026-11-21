@@ -38,6 +38,21 @@ namespace compute.geometry
         public void Configure(IApplicationBuilder app)
         {
             RhinoCoreStartup();
+            Config.LoadUsageLog();
+
+            bool usageLog = Config.UsageLogPath != null;
+            if (usageLog)
+            {
+                Shutdown.RecordSignals();
+                app.UseMiddleware<MeteringMiddleware>();
+                // rhino.compute waits for /healthcheck before sending a child requests; this tells it the usage log is on.
+                app.Use((context, next) =>
+                {
+                    if (context.Request.Path == "/healthcheck")
+                        context.Response.Headers[LocalConnections.USAGE_LOG_HEADER] = "on";
+                    return next(context);
+                });
+            }
 
             // Global exception handler. Sits at the very top of the pipeline so it catches
             // anything thrown by downstream middleware or endpoint handlers. Logs the
@@ -51,6 +66,7 @@ namespace compute.geometry
                 {
                     // About the caller's own request, so it keeps its message in every build.
                     Log.Warning("Bad request {Method} {Path}: {Message}", ctx.Request.Method, ctx.Request.Path, badRequest.Message);
+                    RequestOutcome.Failed(ctx, badRequest.Message);
                     ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
                     ctx.Response.ContentType = "application/json";
                     await ctx.Response.WriteAsync(JsonConvert.SerializeObject(new { error = "Bad Request", message = badRequest.Message, code = "bad_request" })); // VEKTORNODE: SELVA — stable code, see FORK_CHANGES §7
@@ -68,6 +84,8 @@ namespace compute.geometry
 
                 Log.Error(ex, "Unhandled exception during {Method} {Path}: {Category}",
                     ctx.Request.Method, ctx.Request.Path, category ?? "Unknown");
+                // The usage record keeps the real message, which callers see only in debug builds.
+                RequestOutcome.Failed(ctx, message);
 
                 ctx.Response.StatusCode = StatusCodes.Status500InternalServerError;
                 ctx.Response.ContentType = "application/json";
@@ -96,6 +114,8 @@ namespace compute.geometry
             app.UseCors();
             if (!string.IsNullOrEmpty(Config.ApiKey))
                 app.UseMiddleware<ApiKeyMiddleware>();
+            if (usageLog)
+                app.UseMiddleware<BillableMiddleware>();
             app.UseEndpoints(builder =>
             {
                 builder.MapHealthChecks("/healthcheck");
@@ -103,6 +123,8 @@ namespace compute.geometry
                 FixedEndPointsModule.MapEndpoints(builder);
                 ResthopperEndpointsModule.MapEndpoints(builder);
                 ScriptEndpointsModule.MapEndpoints(builder);
+                if (Config.UsageLogPath != null)
+                    McpEndpoint.MapEndpoints(builder);
                 RhinoGetModule.MapEndpoints(builder);
                 RhinoPostModule.MapEndpoints(builder);
             });
@@ -268,6 +290,34 @@ namespace compute.geometry
 
             if (Config.LoadGrasshopper)
                 WarmGrasshopperTypeCache();
+
+            StartMcpListener();
+        }
+
+        // rhino.compute serves /mcp through the RhinoAI plug-in's listener in each child, on the port it passes in
+        // RHINO_MCP_AUTOSTART_PORT. The plug-in starts the listener in its MCPSpawn command, which nothing runs in a
+        // headless child, so it runs here, on a headless document the listener keeps as its startup document.
+        static void StartMcpListener()
+        {
+            if (!int.TryParse(Environment.GetEnvironmentVariable("RHINO_MCP_AUTOSTART_PORT"), out int port) || port <= 0)
+                return;
+            if (System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(listener => listener.Port == port))
+            {
+                Log.Information("The RhinoAI MCP listener is already on port {Port}", port);
+                return;
+            }
+            try
+            {
+                var result = Rhino.RhinoApp.ExecuteCommand(Rhino.RhinoDoc.CreateHeadless(null), "MCPSpawn");
+                if (result == Rhino.Commands.Result.Success)
+                    Log.Information("Started the RhinoAI MCP listener on port {Port}", port);
+                else
+                    Log.Warning("RhinoAI's MCPSpawn command returned {Result}, so /mcp can't reach this process. Is the RhinoAI plug-in installed?", result);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Starting the RhinoAI MCP listener failed, so /mcp can't reach this process");
+            }
         }
 
         // Grasshopper's GH_TypeCache fills its tables without a lock, and nested requests read Grasshopper data on

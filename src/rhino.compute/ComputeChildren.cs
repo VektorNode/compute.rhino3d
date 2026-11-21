@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Threading;
+using compute.geometry;
 using Serilog;
 
 namespace rhino.compute
@@ -108,6 +109,31 @@ namespace rhino.compute
         {
             var (url, port) = SelectChild(reserve: true);
             return new ChildLease(url, port);
+        }
+
+        /// <summary>
+        /// For the usage log: as <see cref="AcquireChild()"/>, also noting the request's metadata header and path,
+        /// which nested calls from the child serving it carry (see <see cref="MetadataServedBy"/>).
+        /// </summary>
+        public static ChildLease AcquireChild(string metadata, string path)
+        {
+            var lease = AcquireChild();
+            lease.Metadata = metadata;
+            lease.Path = path;
+            lock (lockObject)
+                activeLeases.Add(lease);
+            return lease;
+        }
+
+        // VEKTORNODE: SELVA — session affinity: as AcquireChild(metadata, path), for a lease routed by its session.
+        public static ChildLease AcquireChild(string sessionId, string metadata, string path)
+        {
+            var lease = AcquireChild(sessionId);
+            lease.Metadata = metadata;
+            lease.Path = path;
+            lock (lockObject)
+                activeLeases.Add(lease);
+            return lease;
         }
 
         /// <summary>
@@ -283,6 +309,8 @@ namespace rhino.compute
 
             public string BaseUrl { get; }
             public int Port { get; }
+            public string Metadata { get; internal set; }
+            public string Path { get; internal set; }
 
             // VEKTORNODE: SELVA — session affinity: how this lease was routed, null without a session.
             public string Affinity { get; init; }
@@ -292,20 +320,56 @@ namespace rhino.compute
                 if (released)
                     return;
                 released = true;
-                ReleaseChild(Port);
+                ReleaseChild(this);
             }
         }
 
-        static void ReleaseChild(int port)
+        static void ReleaseChild(ChildLease lease)
         {
             lock (lockObject)
             {
-                if (!activeRequests.TryGetValue(port, out int count))
+                activeLeases.Remove(lease);
+                if (!activeRequests.TryGetValue(lease.Port, out int count))
                     return;
                 if (count <= 1)
-                    activeRequests.Remove(port);
+                    activeRequests.Remove(lease.Port);
                 else
-                    activeRequests[port] = count - 1;
+                    activeRequests[lease.Port] = count - 1;
+            }
+        }
+
+        /// <summary>
+        /// A connection opened by a child, or by a process it started, carries nested calls made while that
+        /// child serves another request. Returns that child's port, or 0 for any other connection.
+        /// </summary>
+        public static int NestedCallPort(System.Net.IPAddress remoteAddress, int remotePort, int localPort)
+        {
+            if (!LocalConnections.FromThisMachine(remoteAddress))
+                return 0;
+            Dictionary<int, int> childPorts;
+            lock (lockObject)
+                childPorts = computeProcesses.ToDictionary(child => child.Item1.Id, child => child.Item2);
+            if (childPorts.Count == 0)
+                return 0;
+            return LocalConnections.OpenedBy(remotePort, localPort, childPorts.Keys, orStartedBy: true) is int pid ? childPorts[pid] : 0;
+        }
+
+        /// <summary>
+        /// The metadata header of the request the child on this port is serving, which its nested calls carry;
+        /// null when it isn't serving one.
+        /// </summary>
+        public static string MetadataServedBy(int port)
+        {
+            lock (lockObject)
+            {
+                // Nested calls come from solves, so prefer the child's oldest one.
+                ChildLease serving = null;
+                foreach (var lease in activeLeases)
+                {
+                    if (lease.Port == port && (serving == null || (lease.Path == "/grasshopper" && serving.Path != "/grasshopper")))
+                        serving = lease;
+                }
+                return serving?.Metadata;
             }
         }
 
@@ -751,6 +815,13 @@ namespace rhino.compute
             try
             {
                 using var response = healthClient.GetAsync($"http://localhost:{port}/healthcheck").GetAwaiter().GetResult();
+                if (response.IsSuccessStatusCode)
+                {
+                    bool usageLog = response.Headers.Contains(LocalConnections.USAGE_LOG_HEADER);
+                    if (usageLog && !ReverseProxyModule.UsageLog)
+                        Log.Information("Usage log: on, since Rhino's usage meter is; the children record usage beside Rhino's log");
+                    ReverseProxyModule.UsageLog = usageLog;
+                }
                 return (int)response.StatusCode;
             }
             catch (Exception ex) when (ex is HttpRequestException || ex is OperationCanceledException)
@@ -806,6 +877,8 @@ namespace rhino.compute
         /// the latter). Hard-crash scenarios bypass this entirely — children fall back to the
         /// existing 5-second HasExited poll in their own Shutdown.TimerTask.</para>
         /// </summary>
+        /// <param name="reason">Why, passed to each child for its usage log: parent-stopping,
+        /// shutdown-children or recycle-children.</param>
         /// <param name="portFilter">When non-null, only the child on this port is shut down
         /// (others are left running). When null, all children are shut down.</param>
         /// <param name="respawn">When true, spawn one fresh replacement per shut-down child,
@@ -813,6 +886,7 @@ namespace rhino.compute
         /// children are handling traffic. Respects SpawnCount.</param>
         /// <returns>Ports that were shut down, and ports of any newly-spawned replacements.</returns>
         public static (int[] shutdown, int[] spawned) ShutdownChildren(
+            string reason,
             int? portFilter = null,
             bool respawn = false,
             int gracefulTimeoutSeconds = 3)
@@ -878,7 +952,7 @@ namespace rhino.compute
                 if (tuple.Item1.HasExited) continue;
                 try
                 {
-                    var response = client.PostAsync($"http://localhost:{tuple.Item2}/shutdown", null).GetAwaiter().GetResult();
+                    var response = client.PostAsync($"http://localhost:{tuple.Item2}/shutdown?reason={reason}", null).GetAwaiter().GetResult();
                     Log.Debug("Shutdown request to compute.geometry on port {Port} returned {Status}", tuple.Item2, (int)response.StatusCode);
                 }
                 catch (Exception)
@@ -1073,8 +1147,9 @@ namespace rhino.compute
 
         static object lockObject = new object();
         static Queue<Tuple<Process, int>> computeProcesses = new Queue<Tuple<Process, int>>();
-        // Requests in progress per child port. Protected by lockObject.
+        // Requests in progress per child port, and the requests themselves, oldest first. Protected by lockObject.
         static readonly Dictionary<int, int> activeRequests = new Dictionary<int, int>();
+        static readonly List<ChildLease> activeLeases = new List<ChildLease>();
         // VEKTORNODE: SELVA — session id -> the child holding its warm state. Protected by lockObject.
         static readonly Dictionary<string, SessionClaim> sessionClaims = new Dictionary<string, SessionClaim>(StringComparer.Ordinal);
         // Ports for which a child process has been started but has not yet been confirmed

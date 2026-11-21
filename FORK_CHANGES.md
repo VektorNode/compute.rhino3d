@@ -512,6 +512,12 @@ Tooling and docs with no upstream counterpart:
   default, it also raises rhino.compute's own limit.
 - `docs/quick-start-docker.md`, `docs/grasshopper-plugins-not-loading-linux.md`.
 - `CLAUDE.md` — agent instructions for this fork.
+- `setup/check-secrets.sh` and `.github/workflows/workflow_secrets.yml` — this repository is
+  public, and Terraform state with the Rhino token and Compute key was once committed here. The
+  check fails CI on any tracked state, `.tfvars`, `.env` or private key, and on a token or key
+  written out in full. Run it as a pre-commit hook too:
+  `printf '#!/bin/sh\nexec setup/check-secrets.sh --staged\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
+  `.gitignore` ignores Terraform state, variables and providers.
 - `.gitattributes`, `.gitignore` additions — local conventions.
 - `src/compute.geometry/compute.geometry.csproj` — `<Version>`, bumped on every upstream merge.
 

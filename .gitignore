@@ -56,3 +56,9 @@ setup/packages.json
 
 # Test definitions — may contain proprietary geometry, never commit
 *.ghx
+
+# Terraform: state and variables hold secrets in plain text; providers are downloaded per machine.
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/

@@ -45,6 +45,12 @@ upstream has adopted something we were carrying, drop our version rather than ke
 duplicate. Update `FORK_CHANGES.md` and bump `<Version>` in
 `src/compute.geometry/compute.geometry.csproj` (the only place the version lives).
 
+## Secrets
+
+This repository is public. Never commit Terraform state or variables, `.env` files, keys, a Rhino
+token or a Compute key: a pushed secret stays readable in the history. `setup/check-secrets.sh`
+fails CI on them; run it as a pre-commit hook (see `FORK_CHANGES.md`, Non-source divergence).
+
 ## Building
 
 ```

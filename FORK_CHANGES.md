@@ -518,6 +518,8 @@ Tooling and docs with no upstream counterpart:
   written out in full. Run it as a pre-commit hook too:
   `printf '#!/bin/sh\nexec setup/check-secrets.sh --staged\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
   `.gitignore` ignores Terraform state, variables and providers.
+- `setup/README.md` › _Deploying to a server_ says real servers' settings stay out of this public
+  repo: ours live in a private infrastructure repo that runs `deploy-server.sh` with `ENV_FILE`.
 - `.gitattributes`, `.gitignore` additions — local conventions.
 - `src/compute.geometry/compute.geometry.csproj` — `<Version>`, bumped on every upstream merge.
 

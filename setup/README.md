@@ -178,7 +178,12 @@ Firewall): Docker's published ports bypass `ufw`.
 `./deploy-server.sh` deploys from your machine to any Ubuntu or Debian host you can
 reach over SSH as a user with passwordless sudo, x86-64 for current Rhino builds. How
 the host is created is up to you; it needs nothing installed. The script is configured
-by the `DEPLOY_*` and `SERVER_*` lines in `setup/.env` (template [.env.example](.env.example)). It:
+by the `DEPLOY_*` and `SERVER_*` lines in `setup/.env` (template [.env.example](.env.example)), or
+the file named by `ENV_FILE`.
+
+This repository is public, so keep each real server's settings out of it: our servers live in a
+private infrastructure repo that calls this script with `ENV_FILE` pointing at a file filled from
+1Password at deploy time. The script:
 
 1. Refuses to run unless `setup/` and `src/` are committed and the branch is pushed:
    the server builds the image from GitHub.

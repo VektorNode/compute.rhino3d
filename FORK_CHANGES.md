@@ -50,8 +50,6 @@ An entry goes when its section goes.
   twice.
 - **§8 Child errors are missing from the parent log.** A child's non-2xx body reaches only the
   caller. _Fix:_ the parent logs status and (truncated) body.
-- **§15 Idle shutdown runs late.** A child asks `/idlespan` once per span, so it outlives the span
-  by up to another span: a 5-minute span runs 5–10 minutes. _Fix:_ ask at least every 30 s.
 - **§9 `POST /cache/purge` leaves entries behind.** `MemoryCache.Trim(100)` is best-effort.
   _Fix:_ remove every key.
 - **§6 Undo recording kills the child on Linux.** With `RHINO_COMPUTE_CREATE_HEADLESS_DOC` on,
@@ -173,7 +171,7 @@ retries on another on `HttpRequestError.ConnectionError`, which fires only when 
 made, so no solve runs twice. The evicted child is killed unless another request still holds a
 lease on it. Each attempt takes and releases its own `AcquireChild` lease, and the request body,
 which upstream already reads in full, is read once in the handler so every attempt re-sends the
-same bytes. Non-success child responses are logged with their body, so 500s from compute.geometry
+same bytes: `SendProxyRequest` takes that body beside upstream's usage-log `metadata`. Non-success child responses are logged with their body, so 500s from compute.geometry
 are diagnosable from the parent log.
 
 ### 9. Solve-result cache purge frees native geometry (SELVA FIX)
@@ -276,14 +274,6 @@ that is not gzipped goes out chunked. The Node client fails to read a chunked 50
 its timeout. The proxy sets `ContentLength` before writing; with gzip, upstream's compression
 middleware replaces it with the compressed length.
 
-### 15. Idle shutdown on time (SELVA FIX)
-
-**File:** `src/compute.geometry/Shutdown.cs` — `TimerTask`
-
-Upstream asks the parent for its idle time once per `idlespan`, so a child outlives the span by
-up to a whole span, and core-hour billing runs for all of it: a 5-minute span billed 5–10. The
-child now asks at least every `MaxSpanCheckSeconds` (30), so it exits within 30 s of the span.
-
 ### 16. Solve timing reaches the caller (SELVA)
 
 **Files:** `src/compute.geometry/ResthopperEndpoints.cs` — `GrasshopperSolveHelper`, `Grasshopper`;
@@ -367,6 +357,11 @@ paths go through the same step instead of `GH_Archive.ReadFromFile`, which parse
 A bitmap a component stores inside the definition still throws; no Selva component stores one.
 The Windows build is unchanged.
 
+Re-check after the next Linux deploy: upstream now compiles `System.Drawing.Common` against the
+reference assembly only (`ExcludeAssets="runtime"`), so Rhino's own Linux copy loads instead of
+the NuGet one, which throws on every non-Windows platform. If a `.ghx` with its thumbnail then
+loads, this section and `LinuxGhx.cs` go.
+
 ### 21. Limits a client can read (SELVA)
 
 **Files:** `src/rhino.compute/ReverseProxy.cs` — `MapEndpoints`; `src/compute.geometry/FixedEndpoints.cs` — `GetLimits`
@@ -437,6 +432,12 @@ without the header route as before, and with no claims `TakeChild` chooses exact
 
 A child that lost its Rhino licence still answers 200, with every output empty and no error, so
 none of this notices it: the claim keeps the session on that child until the process is replaced.
+
+With upstream's usage log on, a session's lease is recorded like any other:
+`AcquireChild(sessionId, metadata, path)` does for a claimed child what upstream's
+`AcquireChild(metadata, path)` does for a picked one. The log passes answers through as bytes,
+gzipped when the caller takes gzip, so `BodyText` unpacks a failed answer for the claim check and
+the error log above.
 
 Claims live in the `rhino.compute` process, so several hosts would need load-balancer affinity on
 the same header. Claims keep nothing alive: the idle span still covers the whole pool. They are for
@@ -511,6 +512,12 @@ Tooling and docs with no upstream counterpart:
   default, it also raises rhino.compute's own limit.
 - `docs/quick-start-docker.md`, `docs/grasshopper-plugins-not-loading-linux.md`.
 - `CLAUDE.md` — agent instructions for this fork.
+- `setup/check-secrets.sh` and `.github/workflows/workflow_secrets.yml` — this repository is
+  public, and Terraform state with the Rhino token and Compute key was once committed here. The
+  check fails CI on any tracked state, `.tfvars`, `.env` or private key, and on a token or key
+  written out in full. Run it as a pre-commit hook too:
+  `printf '#!/bin/sh\nexec setup/check-secrets.sh --staged\n' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`.
+  `.gitignore` ignores Terraform state, variables and providers.
 - `.gitattributes`, `.gitignore` additions — local conventions.
 - `src/compute.geometry/compute.geometry.csproj` — `<Version>`, bumped on every upstream merge.
 

@@ -1,0 +1,15 @@
+# Secret scanning (gitleaks): the pre-commit hook and CI run it. VektorNode convention:
+# vektornode-infra/docs/env.md › Secret scanning. Allowlist only what is provably not a secret.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Test fixtures, templates, lockfiles and known non-secrets"
+paths = [
+	'''(^|/)(__tests__|tests?|e2e|fixtures)/''',
+	'''\.(test|spec)\.[cm]?[jt]sx?$''',
+	'''(^|/)[A-Za-z.]+\.Tests?/''',
+	'''\.(example|sample)$''',
+	'''(^|/)pnpm-lock\.yaml$''',
+]

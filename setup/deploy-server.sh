@@ -161,6 +161,7 @@ for p in "${_plugin_dirs[@]}"; do
     p="$(echo "$p" | xargs)"
     [ -z "$p" ] && continue
     [ -d "$p" ] || die "plugin folder not found: $p"
+    p="$(cd "$p" && pwd)"  # absolute: ln -s resolves a relative target against $STAGE, not here
     name="$(mount_name "$p")"
     if git -C "$p" rev-parse --git-dir >/dev/null 2>&1; then
         repo="$(basename "$(git -C "$p" rev-parse --show-toplevel)")"

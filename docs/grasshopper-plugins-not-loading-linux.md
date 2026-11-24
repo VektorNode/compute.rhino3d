@@ -102,18 +102,12 @@ All in this repo:
 
 Separate but related: definitions containing script components
 (RhinoCodePluginGH) can fail with `NullReferenceException` in
-`Rhino.Runtime.Code.Languages.LanguageRegistryQuery.WherePasses` when
-several requests arrive in parallel right after a (re)start. Script
-languages initialize lazily on the first scripted definition, and that
-init races itself under concurrent requests. Once the languages finish
-loading (seconds), subsequent requests succeed — a retry recovers.
-
-We chose to keep the code close to upstream and NOT ship a workaround.
-If it bites, the known fix is a one-time startup warm-up via
-`RhinoCodePlatform.Rhino3D.Registrar.StartScriptingLanguages(LanguageSpec.CSharp/Python3, true)`
-(the same blocking init path the script components use; ~0.3s for C#,
-~10s for Python) — call it after Grasshopper loads in
-`Startup.RhinoCoreStartup`.
+`Rhino.Runtime.Code.Languages.LanguageRegistryQuery.WherePasses`, or with
+`An item with the same key has already been added. Key: C# 9.0 (mcneel.roslyn.csharp)`,
+when several requests arrive in parallel right after a (re)start. RhinoCode
+registers its languages on the first script component behind an unlocked
+flag, so concurrent first uses register twice. Fixed by registering them
+at startup; see `FORK_CHANGES.md` §28.
 
 ## The opposite failure: the *wrong* plugin loads (September 2026)
 

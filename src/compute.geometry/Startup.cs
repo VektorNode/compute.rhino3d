@@ -291,8 +291,40 @@ namespace compute.geometry
             if (Config.LoadGrasshopper)
                 WarmGrasshopperTypeCache();
 
+            RegisterScriptingLanguages(); // VEKTORNODE: SELVA FIX — see FORK_CHANGES §28
+
             StartMcpListener();
         }
+
+        // ── BEGIN VEKTORNODE: SELVA FIX — script languages registered before any request ──
+        // RhinoCode registers its languages on the first script component, behind an unlocked flag
+        // (Registrar.PrepareLanguages). Two requests loading scripted definitions at once both register, and the
+        // second throws "An item with the same key has already been added. Key: C# 9.0 (mcneel.roslyn.csharp)".
+        // Registering here, on the main thread before Kestrel listens, leaves the flag set. Starting a language
+        // stays lazy: Python 3 takes seconds.
+        static void RegisterScriptingLanguages()
+        {
+            try
+            {
+                const string platformAssembly = "RhinoCodePlatform.Rhino3D";
+                var assembly = AppDomain.CurrentDomain.GetAssemblies().FirstOrDefault(a => a.GetName().Name == platformAssembly)
+                    ?? System.Reflection.Assembly.Load(platformAssembly);
+                var startScripting = assembly.GetType("RhinoCodePlatform.Rhino3D.Registrar")?.GetMethod("StartScripting", new[] { typeof(bool) });
+                if (startScripting == null)
+                {
+                    Log.Warning("Registrar.StartScripting(bool) not found; script languages register on first use and concurrent first uses can fail");
+                    return;
+                }
+                // true, as the script components pass: StartPlatform has usually run already, so it starts nothing.
+                startScripting.Invoke(null, new object[] { true });
+                Log.Debug("Registered scripting languages");
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Unable to register scripting languages at startup");
+            }
+        }
+        // ── END   VEKTORNODE: SELVA FIX — script languages registered before any request ──
 
         // rhino.compute serves /mcp through the RhinoAI plug-in's listener in each child, on the port it passes in
         // RHINO_MCP_AUTOSTART_PORT. The plug-in starts the listener in its MCPSpawn command, which nothing runs in a

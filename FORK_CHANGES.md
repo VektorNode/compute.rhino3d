@@ -59,6 +59,10 @@ An entry goes when its section goes.
 - **§10 Plugin load failures are silent on Linux.** Definitions then solve with core components
   only (cause: the first Rhino bug below). _Fix:_ log `ComponentServer.LoadingExceptions`, and
   quarantine GHAs that crash the scan before it runs.
+- **§28 Concurrent first script components fail.** RhinoCode registers its languages lazily behind an
+  unlocked flag, so two cold requests with script components race: `An item with the same key has
+  already been added. Key: C# 9.0 (mcneel.roslyn.csharp)`. _Fix:_ `Registrar.StartScripting(true)` at
+  startup, like `WarmGrasshopperTypeCache`.
 - **§14 Chunked 500s.** `rhino.compute` sends an uncompressed answer chunked, and Node's HTTP
   client hangs on a chunked 500 until its timeout. Chunked is valid HTTP, so this is client
   compatibility. _Fix:_ the proxy sets `Content-Length`.
@@ -496,6 +500,21 @@ with SheepMetal `2.2.0-beta.1` and WombatGH `1.3.0` reported `2.2.0.0` and `1.1.
 Yak installed, the version is now the name of its package folder
 (`packages/<rhino>/<package>/<version>/`), the one an operator pinned. Other plugins keep the
 assembly's own version. The response shape doesn't change.
+
+### 28. Script languages registered at startup (SELVA FIX)
+
+**File:** `src/compute.geometry/Startup.cs` — `RegisterScriptingLanguages`
+
+RhinoCode registers its languages when the first script component initializes
+(`RhinoCodePlatform.Rhino3D.Registrar.PrepareLanguages`, in Rhino 8 and 9), behind a plain `bool`
+with no lock. Upstream leaves that to the first scripted request. `/io` loads definitions outside the
+solve lock and nested solves skip it, so two cold requests can register at once. The second fails with
+`An item with the same key has already been added. Key: C# 9.0 (mcneel.roslyn.csharp)`, or with an
+NRE in `LanguageRegistryQuery.WherePasses` while the first one is still registering. Each new child
+starts cold, so this keeps coming back. Startup now calls `Registrar.StartScripting(true)` before
+Kestrel listens. It only registers the languages, which is cheap. Each language still starts on first
+use, because Python 3 takes seconds. Upstream's `WarmGrasshopperTypeCache` (COMPUTE-391) handles
+`GH_TypeCache` the same way.
 
 ---
 

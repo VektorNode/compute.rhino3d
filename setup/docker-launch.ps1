@@ -31,6 +31,7 @@
 #   IDLE_SPAN         - Seconds without a request before the compute.geometry
 #                       children exit and stop core-hour billing (Compute's own
 #                       default: 3600). The next solve respawns them.
+#   TIMEOUT           - Longest one request may run, in seconds (Compute default 100).
 #   RESTART           - Docker restart policy (default: unless-stopped)
 #
 # Rhino.Compute has no core limit of its own: --childcount only sets how many
@@ -58,7 +59,7 @@ function Fail([string]$m) { Write-Host ""; Write-Host "ERROR: $m" -ForegroundCol
 # -------------------------------------------------------
 $Vars = @('RHINO_TOKEN','RHINO_COMPUTE_KEY','IMAGE_NAME','CONTAINER_NAME','PORT',
           'CHILD_COUNT','REPO_URL','BRANCH','NO_BUILD','FRESH','LOCAL_PLUGINS','PLATFORM',
-          'CPUS','CPUSET','MEMORY','CACHE_LIMIT_PERCENT','IDLE_SPAN','RESTART')
+          'CPUS','CPUSET','MEMORY','CACHE_LIMIT_PERCENT','IDLE_SPAN','TIMEOUT','RESTART')
 
 $EnvFile = Join-Path $ScriptDir '.env'
 if (Test-Path $EnvFile) {
@@ -93,6 +94,7 @@ $CpuSet        = EnvOr 'CPUSET'         ''
 $MemoryLimit   = EnvOr 'MEMORY'         ''
 $CacheLimit    = EnvOr 'CACHE_LIMIT_PERCENT' ''
 $IdleSpan      = EnvOr 'IDLE_SPAN'      ''
+$Timeout       = EnvOr 'TIMEOUT'        ''
 $Restart       = EnvOr 'RESTART'        'unless-stopped'
 
 Write-Host ""
@@ -304,6 +306,7 @@ $runArgs = @('run', '-d', '--platform', $Platform, '--name', $ContainerName,
 if ($ComputeKey) { $runArgs += @('-e', "RHINO_COMPUTE_KEY=$ComputeKey") }
 if ($CacheLimit) { $runArgs += @('-e', "RHINO_COMPUTE_CACHE_PHYSICAL_LIMIT_PERCENT=$CacheLimit") }
 if ($IdleSpan)   { $runArgs += @('-e', "RHINO_COMPUTE_IDLE_SPAN=$IdleSpan") }
+if ($Timeout)    { $runArgs += @('-e', "RHINO_COMPUTE_TIMEOUT=$Timeout") }
 $runArgs += $limitArgs
 $runArgs += $mounts
 $runArgs += $ImageName

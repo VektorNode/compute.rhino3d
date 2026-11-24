@@ -34,6 +34,8 @@
 #   IDLE_SPAN     - Seconds without a request before the compute.geometry
 #                   children exit and stop core-hour billing (Compute's own
 #                   default: 3600). The next solve respawns them.
+#   TIMEOUT       - Longest one request may run, in seconds (Compute default 100).
+#                   A longer solve answers 504; clients read it from GET /limits.
 #   ABORT_ON_HANGUP - true stops a solve whose caller hung up. Compute's own
 #                   default finishes it into the cache, holding a child meanwhile.
 #   RESTART       - Docker restart policy (default: unless-stopped).
@@ -135,6 +137,7 @@ echo "  CPU limit  : $([ -n "$CPUSET" ] && echo "cores $CPUSET (pinned)" || { [ 
 [ -n "$MEMORY" ] && echo "  Memory     : $MEMORY (no swap)"
 [ -n "$CACHE_LIMIT_PERCENT" ] && echo "  Cache evict: at ${CACHE_LIMIT_PERCENT}% memory load"
 [ -n "$IDLE_SPAN" ] && echo "  Idle span  : ${IDLE_SPAN}s"
+[ -n "$TIMEOUT" ] && echo "  Timeout    : ${TIMEOUT}s"
 [ -n "$ABORT_ON_HANGUP" ] && echo "  Abort on hang-up: $ABORT_ON_HANGUP"
 echo "  Restart    : $RESTART"
 echo "  Token      : $([ -n "$RHINO_TOKEN" ] && echo "set" || echo "NOT SET (computations will fail)")"
@@ -306,6 +309,7 @@ ENV_ARGS=()
 [ -n "$RHINO_COMPUTE_KEY" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_KEY=$RHINO_COMPUTE_KEY")
 [ -n "$CACHE_LIMIT_PERCENT" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_CACHE_PHYSICAL_LIMIT_PERCENT=$CACHE_LIMIT_PERCENT")
 [ -n "$IDLE_SPAN" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_IDLE_SPAN=$IDLE_SPAN")
+[ -n "$TIMEOUT" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_TIMEOUT=$TIMEOUT")
 [ -n "$ABORT_ON_HANGUP" ] && ENV_ARGS+=(-e "RHINO_COMPUTE_ABORT_ON_HANGUP=$ABORT_ON_HANGUP")
 
 # --init puts tini at PID 1 to reap orphaned processes and forward signals; without
